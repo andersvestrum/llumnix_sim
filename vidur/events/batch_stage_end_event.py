@@ -1,3 +1,4 @@
+import json
 from typing import List
 
 from vidur.entities.batch import Batch
@@ -100,6 +101,7 @@ class BatchStageEndEvent(BaseEvent):
                 "size": self._batch.size,
                 "num_prefill_tokens": self._batch.num_prefill_tokens,
                 "num_decode_tokens": self._batch.num_decode_tokens,
+                "requests": json.dumps(self._batch.get_request_token_breakdown(), indent=2),
             },
         }]
 

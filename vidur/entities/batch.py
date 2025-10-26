@@ -135,6 +135,24 @@ class Batch(BaseEntity):
     @property
     def completed_requests(self) -> List[Request]:
         return [request for request in self._requests if request.completed]
+    
+    def get_request_token_breakdown(self) -> list[dict]:
+        """
+        Return a per-request token breakdown, distinguishing prefill vs decode tokens.
+        """
+        breakdown = []
+        for request, num_tokens in zip(self._requests, self._num_tokens):
+            prefill_tokens = num_tokens if not request.is_prefill_complete else 0
+            decode_tokens = num_tokens - prefill_tokens
+            breakdown.append({
+                "request_id": request.id,
+                "prefill_tokens": prefill_tokens,
+                "decode_tokens": decode_tokens,
+                "total_tokens": num_tokens,
+                "completed": request.completed,
+                "preempted": request.preempted,
+            })
+        return breakdown
 
     def to_dict(self) -> dict:
         return {
@@ -148,4 +166,5 @@ class Batch(BaseEntity):
             "num_tokens": self._num_tokens,
             "num_prefill_tokens": self.num_prefill_tokens,
             "num_decode_tokens": self.num_decode_tokens,
+            "requests": self._batch.get_request_token_breakdown(),
         }
