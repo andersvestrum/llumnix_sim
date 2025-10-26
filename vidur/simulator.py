@@ -46,7 +46,6 @@ class Simulator:
         )
 
         self._init_event_queue()
-        atexit.register(self._write_output)
 
     @property
     def scheduler(self) -> BaseGlobalScheduler:
@@ -71,9 +70,10 @@ class Simulator:
                 self._event_trace.append(event.to_dict())
 
             if self._config.metrics_config.enable_chrome_trace:
-                chrome_trace = event.to_chrome_trace()
-                if chrome_trace:
-                    self._event_chrome_trace.append(chrome_trace)
+                chrome_events = event.to_chrome_trace()
+                if chrome_events:
+                    self._event_chrome_trace.extend(chrome_events)
+
 
         assert self._scheduler.is_empty() or self._terminate
 
