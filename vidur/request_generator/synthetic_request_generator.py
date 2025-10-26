@@ -26,6 +26,8 @@ class SyntheticRequestGenerator(BaseRequestGenerator):
             self.config.interval_generator_config.get_type(),
             self.config.interval_generator_config,
         )
+        # internal counter used to assign round-robin priorities to generated synthetic requests when num_priority_levels > 1
+        self._prio_counter = 0
 
     def _generate_next_request(self, last_arrived_at: float) -> Request:
         inter_request_time = (
@@ -43,11 +45,25 @@ class SyntheticRequestGenerator(BaseRequestGenerator):
         if prefill_tokens is None or decode_tokens is None:
             return None
 
-        return Request(
+        req = Request(
             arrived_at=arrived_at,
             num_prefill_tokens=int(prefill_tokens),
             num_decode_tokens=int(decode_tokens),
         )
+
+        # Priorities range from 0 .. num_priority_levels-1, where higher number == higher priority.
+        # If num_priority_levels == 1 this will always be 0 and behaviour is unchanged.
+        try:
+            levels = int(getattr(self.config, "num_priority_levels", 1))
+        except Exception:
+            levels = 1
+
+        if levels > 1:
+            req.priority = self._prio_counter % levels
+            self._prio_counter += 1
+
+        return req
+        
 
     def _generate_requests(self) -> List[Request]:
         requests = []

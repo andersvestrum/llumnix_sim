@@ -83,6 +83,15 @@ class BatchStageEndEvent(BaseEvent):
         }
 
     def to_chrome_trace(self) -> list[dict]:
+        # collect per-request priority if available
+        request_priorities = [getattr(r, "priority", None) for r in self._batch.requests]
+
+        # choose a representative batch priority when all requests share the same priority
+        batch_priority = None
+        if request_priorities:
+            unique_priorities = set(request_priorities)
+            if len(unique_priorities) == 1:
+                batch_priority = request_priorities[0]
 
         return [{
             "name": f"Batch {self._batch.id} Stage {self._stage_id}",
@@ -100,6 +109,8 @@ class BatchStageEndEvent(BaseEvent):
                 "size": self._batch.size,
                 "num_prefill_tokens": self._batch.num_prefill_tokens,
                 "num_decode_tokens": self._batch.num_decode_tokens,
+                "batch_priority": batch_priority,
+                "request_priorities": request_priorities,
             },
         }]
 

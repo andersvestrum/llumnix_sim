@@ -215,6 +215,10 @@ class SyntheticRequestGeneratorConfig(BaseRequestGeneratorConfig):
         default=None,
         metadata={"help": "Duration of the synthetic request generator."},
     )
+    num_priority_levels: int = field(
+        default=1,
+        metadata={"help": "Number of priority levels to assign to synthetic requests."},
+    )
 
     def __post_init__(self):
         self.max_tokens = self.length_generator_config.max_tokens
@@ -488,6 +492,18 @@ class LORGlobalSchedulerConfig(BaseGlobalSchedulerConfig):
     @staticmethod
     def get_type():
         return GlobalSchedulerType.LOR
+
+
+@dataclass
+class LlumnixGlobalSchedulerConfig(BaseGlobalSchedulerConfig):
+
+    num_priority_levels: int = field(
+        default=2, metadata={"help": "Number of priority levels for llumnix."}
+    )
+
+    @staticmethod
+    def get_type():
+        return GlobalSchedulerType.LLUMNIX
 
 
 @dataclass
