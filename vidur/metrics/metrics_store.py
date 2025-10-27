@@ -819,3 +819,14 @@ class MetricsStore:
             return
         self._replica_busy_time[replica_id - 1][stage_id - 1].put(time, 0)
         self._replica_mfu[replica_id - 1][stage_id - 1].put(time, 0)
+    
+    def on_request_migration(
+        self, request_id: int, source_replica_id: int, target_replica_id: int, 
+        kv_cache_blocks: int, time: float
+    ) -> None:
+        """Track request migration event for Llumnix scheduler."""
+        # For now, just log it. Could extend with metrics tracking if needed.
+        logger.info(
+            f"Migration tracked: request {request_id} from replica {source_replica_id} "
+            f"to {target_replica_id}, {kv_cache_blocks} blocks at {time}s"
+        )

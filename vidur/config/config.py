@@ -500,6 +500,38 @@ class LlumnixGlobalSchedulerConfig(BaseGlobalSchedulerConfig):
     num_priority_levels: int = field(
         default=2, metadata={"help": "Number of priority levels for llumnix."}
     )
+    
+    enable_migration: bool = field(
+        default=False, metadata={"help": "Enable live instance migration for load balancing."}
+    )
+    
+    rebalance_interval: float = field(
+        default=1.0, metadata={"help": "Time between rebalancing checks (seconds)."}
+    )
+    
+    load_imbalance_threshold: float = field(
+        default=0.3, metadata={"help": "Trigger rebalancing when load std dev exceeds this."}
+    )
+    
+    load_metric_alpha: float = field(
+        default=1.0, metadata={"help": "Weight for queue length in load calculation."}
+    )
+    
+    load_metric_beta: float = field(
+        default=1.0, metadata={"help": "Weight for running requests in load calculation."}
+    )
+    
+    load_metric_gamma: float = field(
+        default=1.0, metadata={"help": "Weight for memory usage in load calculation."}
+    )
+    
+    network_bandwidth_gbps: float = field(
+        default=100.0, metadata={"help": "Network bandwidth for KV cache migration (Gbps)."}
+    )
+    
+    migration_overhead_ms: float = field(
+        default=5.0, metadata={"help": "Fixed overhead per migration (milliseconds)."}
+    )
 
     @staticmethod
     def get_type():
