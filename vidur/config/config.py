@@ -491,6 +491,34 @@ class LORGlobalSchedulerConfig(BaseGlobalSchedulerConfig):
 
 
 @dataclass
+class LlumnixGlobalSchedulerConfig(BaseGlobalSchedulerConfig):
+    freeness_low: float = field(
+        default=10.0,
+        metadata={"help": "Lower freeness threshold (below this, replica is overloaded)."},
+    )
+    freeness_high: float = field(
+        default=60.0,
+        metadata={"help": "Upper freeness threshold (above this, replica is underloaded)."},
+    )
+    migration_period: float = field(
+        default=0.1,
+        metadata={"help": "Seconds between migration rounds."},
+    )
+    priority_headroom_high: int = field(
+        default=1600,
+        metadata={"help": "Headroom tokens for high-priority requests."},
+    )
+    priority_headroom_normal: int = field(
+        default=0,
+        metadata={"help": "Headroom tokens for normal-priority requests."},
+    )
+
+    @staticmethod
+    def get_type():
+        return GlobalSchedulerType.LLUMNIX
+
+
+@dataclass
 class BaseExecutionTimePredictorConfig(BasePolyConfig):
     compute_input_file: str = field(
         default="./data/profiling/compute/{DEVICE}/{MODEL}/mlp.csv",

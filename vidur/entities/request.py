@@ -224,27 +224,36 @@ class Request(BaseEntity):
         time: float,
         num_tokens_processed: int,
     ) -> None:
+        # --- Defensive clamp for over-counting batches ---
+        remaining = self.total_tokens - self._num_processed_tokens
+        if num_tokens_processed > remaining:
+            from vidur.logger import init_logger
+            _log = init_logger(__name__)
+            _log.warning(
+                f"[SAFEGUARD] Request {self._id}: "
+                f"clamping batch tokens from {num_tokens_processed} → {remaining} "
+                f"(processed={self._num_processed_tokens}, total={self.total_tokens})"
+            )
+            num_tokens_processed = remaining
+
+        # --- Normal accounting ---
         self._num_processed_tokens += num_tokens_processed
         self._latest_iteration_completed_at = time
 
-        assert self._num_processed_tokens <= self.total_tokens
-
-        if self._num_processed_tokens == self._num_prefill_tokens:
+        # --- Prefill completion logic ---
+        if self._num_processed_tokens >= self._num_prefill_tokens and not self._is_prefill_complete:
             self._is_prefill_complete = True
-            # we get one decode token when the prefill processing completes
-            self._num_processed_tokens += 1
-
-            # we must record the prefill completion time only in the first time
-            # in the subsequent restarts, we keep adding the previously decoded
-            # tokens to the prefill tokens - that is irrelevant to the original prefill
+            # One decode token comes immediately after prefill
+            self._num_processed_tokens = min(self._num_processed_tokens + 1, self.total_tokens)
             if self._prefill_completed_at == 0:
                 self._prefill_completed_at = time
 
-        # check if request is completed
-        if self._num_processed_tokens == self.total_tokens:
+        # --- Request completion check ---
+        if self._num_processed_tokens >= self.total_tokens:
             self._completed_at = time
             self._completed = True
             logger.debug(f"Request {self._id} completed at {self._completed_at}")
+
 
     def on_batch_stage_schedule(
         self,

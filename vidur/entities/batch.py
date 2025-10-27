@@ -7,22 +7,21 @@ from vidur.logger import init_logger
 logger = init_logger(__name__)
 
 
-# a decorator which checks if the request has been scheduled
 def check_scheduled(func):
+    """Ensure batch has been scheduled before accessing."""
     def wrapper(self, *args, **kwargs):
         if not self._scheduled:
             raise ValueError("Batch has not been scheduled yet")
         return func(self, *args, **kwargs)
-
     return wrapper
 
 
 def check_completed(func):
+    """Ensure batch has been completed before accessing."""
     def wrapper(self, *args, **kwargs):
         if not self._completed:
-            raise ValueError("Batch has not been scheduled yet")
+            raise ValueError("Batch has not been completed yet")
         return func(self, *args, **kwargs)
-
     return wrapper
 
 
@@ -32,18 +31,25 @@ class Batch(BaseEntity):
         replica_id: int,
         requests: List[Request],
         num_tokens: List[int],
+        phase_flags: List[str] | None = None,  # <--- added field for phase snapshot
     ) -> None:
         self._id = Batch.generate_id()
         self._replica_id = replica_id
-
         self._requests = requests
         self._num_tokens = num_tokens
         self._total_num_tokens = sum(num_tokens)
-        self._num_prefill_tokens = sum(
-            [
-                (t if not r.is_prefill_complete else 0)
-                for r, t in zip(self.requests, self._num_tokens)
+
+        # ✅ Snapshot the per-request phase (“prefill” or “decode”) at batch creation
+        if phase_flags is None:
+            phase_flags = [
+                "decode" if r.is_prefill_complete else "prefill" for r in requests
             ]
+        self._phase_flags = phase_flags
+
+        # ✅ Compute prefill tokens using *snapshotted phase*, not live request state
+        self._num_prefill_tokens = sum(
+            t if phase == "prefill" else 0
+            for t, phase in zip(self._num_tokens, self._phase_flags)
         )
 
         self._total_num_tokens_rounded = (self._total_num_tokens + 7) // 8 * 8
@@ -53,13 +59,10 @@ class Batch(BaseEntity):
         self._scheduled = False
         self._completed = False
 
+    # --- Properties ---
     @property
     def replica_id(self) -> int:
         return self._replica_id
-
-    @property
-    def creation_time(self) -> float:
-        return self._creation_time
 
     @property
     def num_tokens(self) -> List[int]:
@@ -105,53 +108,60 @@ class Batch(BaseEntity):
 
     @property
     def request_ids(self) -> List[int]:
-        return [request.id for request in self._requests]
+        return [r.id for r in self._requests]
+
+    @property
+    def phase_flags(self) -> List[str]:
+        return self._phase_flags
 
     @property
     def all_requests_completed(self) -> bool:
-        return all([request.completed for request in self._requests])
+        return all(r.completed for r in self._requests)
 
-    def on_schedule(
-        self,
-        time: float,
-    ) -> None:
+    # --- Lifecycle ---
+    def on_schedule(self, time: float) -> None:
         self._scheduled_at = time
         self._scheduled = True
-
         for request in self._requests:
             request.on_batch_schedule(time)
 
-    def on_batch_end(self, time: float):
+    def on_batch_end(self, time: float) -> None:
         self._completed = True
         self._completed_at = time
-
         for request, num_tokens in zip(self._requests, self._num_tokens):
             request.on_batch_end(time, num_tokens)
 
+    # --- Helpers ---
     @property
     def preempted_requests(self) -> List[Request]:
-        return [request for request in self._requests if request.preempted]
+        return [r for r in self._requests if r.preempted]
 
     @property
     def completed_requests(self) -> List[Request]:
-        return [request for request in self._requests if request.completed]
-    
-    def get_request_token_breakdown(self) -> list[dict]:
+        return [r for r in self._requests if r.completed]
+
+    def get_request_token_breakdown(self) -> List[dict]:
         """
-        Return a per-request token breakdown, distinguishing prefill vs decode tokens.
+        Return a per-request token breakdown, using the *snapshotted phase*.
+        This avoids misclassifying decode batches later.
         """
         breakdown = []
-        for request, num_tokens in zip(self._requests, self._num_tokens):
-            prefill_tokens = num_tokens if not request.is_prefill_complete else 0
-            decode_tokens = num_tokens - prefill_tokens
-            breakdown.append({
-                "request_id": request.id,
-                "prefill_tokens": prefill_tokens,
-                "decode_tokens": decode_tokens,
-                "total_tokens": num_tokens,
-                "completed": request.completed,
-                "preempted": request.preempted,
-            })
+        for request, num_tokens, phase in zip(
+            self._requests, self._num_tokens, self._phase_flags
+        ):
+            prefill_tokens = num_tokens if phase == "prefill" else 0
+            decode_tokens = num_tokens if phase == "decode" else 0
+            breakdown.append(
+                {
+                    "request_id": request.id,
+                    "phase": phase,
+                    "prefill_tokens": prefill_tokens,
+                    "decode_tokens": decode_tokens,
+                    "total_tokens": num_tokens,
+                    "completed": request.completed,
+                    "preempted": request.preempted,
+                }
+            )
         return breakdown
 
     def to_dict(self) -> dict:
@@ -166,5 +176,5 @@ class Batch(BaseEntity):
             "num_tokens": self._num_tokens,
             "num_prefill_tokens": self.num_prefill_tokens,
             "num_decode_tokens": self.num_decode_tokens,
-            "requests": self._batch.get_request_token_breakdown(),
+            "requests": self.get_request_token_breakdown(),
         }

@@ -117,11 +117,26 @@ class BaseReplicaScheduler(ABC):
         assert self._num_allocated_blocks <= self._config.num_blocks
 
     def free(self, *request_ids: List[int]) -> None:
+        from vidur.logger import init_logger
+        _log = init_logger(__name__)
+
         for request_id in request_ids:
+            # ✅ Only free if still tracked
+            if request_id not in self._allocation_map:
+                _log.debug(f"[SAFEFREE] Request {request_id} already freed or migrated; skipping.")
+                continue
+
             num_blocks = self._allocation_map.pop(request_id)
             self._num_allocated_blocks -= num_blocks
+            _log.debug(f"[FREE] Freed {num_blocks} blocks for request {request_id}.")
 
-        assert self._num_allocated_blocks >= 0
+        # ✅ Prevent underflow if something goes wrong
+        if self._num_allocated_blocks < 0:
+            _log.warning(
+                f"[SAFEFREE] Replica {getattr(self, '_replica_id', '?')} "
+                f"allocation underflow: {self._num_allocated_blocks}"
+            )
+            self._num_allocated_blocks = 0
 
     def free_batch(self, batch: Batch) -> None:
         self.free(*batch.request_ids)

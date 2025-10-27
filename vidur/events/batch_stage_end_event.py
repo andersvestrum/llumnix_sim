@@ -84,26 +84,60 @@ class BatchStageEndEvent(BaseEvent):
         }
 
     def to_chrome_trace(self) -> list[dict]:
+        batch = self._batch
+        stage = self._batch_stage
+        replica_id = self._replica_id
+        stage_id = self._stage_id
+        is_last_stage = self._is_last_stage
 
-        return [{
-            "name": f"Batch {self._batch.id} Stage {self._stage_id}",
+        # --- compute per-request tokens from batch.num_tokens (actual values) ---
+        per_req_entries = []
+        total_prefill_tokens = 0
+        total_decode_tokens = 0
+
+        # zip ensures we use the per-request num_tokens from that batch
+        for req, tokens in zip(batch.requests, batch.num_tokens):
+            if req.is_prefill_complete:
+                decode_tokens = tokens
+                prefill_tokens = 0
+            else:
+                prefill_tokens = tokens
+                decode_tokens = 0
+
+            per_req_entries.append({
+                "request_id": req.id,
+                "prefill_tokens": prefill_tokens,
+                "decode_tokens": decode_tokens,
+                "total_tokens": tokens,
+                "completed": req.completed,
+                "preempted": req.preempted,
+            })
+
+            total_prefill_tokens += prefill_tokens
+            total_decode_tokens += decode_tokens
+
+        trace_entry = {
+            "name": f"Batch {batch.id} Stage {stage_id}",
             "ph": "X",
-            "ts": self._batch_stage.scheduled_at * 1e6,  # start time
-            "dur": self._batch_stage.execution_time * 1e6,  # duration
-            "pid": self._replica_id,
-            "tid": self._stage_id,
+            "ts": stage.scheduled_at * 1e6,
+            "dur": stage.execution_time * 1e6,
+            "pid": replica_id,
+            "tid": stage_id,
             "args": {
-                "batch_id": self._batch.id,
-                "batch_stage_id": self._batch_stage.id,
-                "replica_id": self._replica_id,
-                "stage_id": self._stage_id,
-                "is_last_stage": self._is_last_stage,
-                "size": self._batch.size,
-                "num_prefill_tokens": self._batch.num_prefill_tokens,
-                "num_decode_tokens": self._batch.num_decode_tokens,
-                "requests": json.dumps(self._batch.get_request_token_breakdown(), indent=2),
+                "batch_id": batch.id,
+                "batch_stage_id": stage.id,
+                "replica_id": replica_id,
+                "stage_id": stage_id,
+                "is_last_stage": is_last_stage,
+                "size": batch.size,
+                "num_prefill_tokens": total_prefill_tokens,
+                "num_decode_tokens": total_decode_tokens,
+                "requests": per_req_entries,
             },
-        }]
+        }
+
+        return [trace_entry]
+
 
 
 
