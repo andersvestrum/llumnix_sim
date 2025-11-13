@@ -3,13 +3,16 @@ import heapq
 import json
 from typing import List
 
+from tqdm import tqdm
+
 from vidur.config import SimulationConfig
 from vidur.entities import Cluster
-from vidur.events import BaseEvent, RequestArrivalEvent
+from vidur.events import BaseEvent, RequestArrivalEvent, RebalanceEvent
 from vidur.logger import init_logger
 from vidur.metrics import MetricsStore
 from vidur.request_generator import RequestGeneratorRegistry
 from vidur.scheduler import BaseGlobalScheduler, GlobalSchedulerRegistry
+from vidur.types import GlobalSchedulerType
 
 logger = init_logger(__name__)
 
@@ -46,7 +49,6 @@ class Simulator:
         )
 
         self._init_event_queue()
-        atexit.register(self._write_output)
 
     @property
     def scheduler(self) -> BaseGlobalScheduler:
@@ -61,19 +63,49 @@ class Simulator:
             f"Starting simulation with cluster: {self._cluster} and {len(self._event_queue)} requests"
         )
 
-        while self._event_queue and not self._terminate:
-            _, event = heapq.heappop(self._event_queue)
-            self._set_time(event._time)
-            new_events = event.handle_event(self._scheduler, self._metric_store)
-            self._add_events(new_events)
+        # Create progress bar based on time limit or event count
+        if self._time_limit != float("inf"):
+            pbar = tqdm(total=100, desc="Simulation Progress", unit="%", 
+                       bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
+            last_progress = 0
+        else:
+            # If no time limit, use event count
+            total_events = len(self._event_queue)
+            pbar = tqdm(total=total_events, desc="Processing Events", unit="events")
+            last_progress = 0
 
-            if self._config.metrics_config.write_json_trace:
-                self._event_trace.append(event.to_dict())
+        event_count = 0
+        try:
+            while self._event_queue and not self._terminate:
+                _, event = heapq.heappop(self._event_queue)
+                self._set_time(event._time)
+                new_events = event.handle_event(self._scheduler, self._metric_store)
+                self._add_events(new_events)
 
-            if self._config.metrics_config.enable_chrome_trace:
-                chrome_trace = event.to_chrome_trace()
-                if chrome_trace:
-                    self._event_chrome_trace.append(chrome_trace)
+                if self._config.metrics_config.write_json_trace:
+                    self._event_trace.append(event.to_dict())
+
+                if self._config.metrics_config.enable_chrome_trace:
+                    chrome_events = event.to_chrome_trace()
+                    if chrome_events:
+                        self._event_chrome_trace.extend(chrome_events)
+
+                # Update progress bar
+                event_count += 1
+                if self._time_limit != float("inf"):
+                    # Update based on time progress
+                    progress = min(100, int((self._time / self._time_limit) * 100))
+                    if progress > last_progress:
+                        pbar.update(progress - last_progress)
+                        last_progress = progress
+                        pbar.set_postfix({'time': f'{self._time:.2f}s', 'events': event_count})
+                else:
+                    # Update based on event count
+                    pbar.update(1)
+                    pbar.set_postfix({'time': f'{self._time:.2f}s'})
+
+        finally:
+            pbar.close()
 
         assert self._scheduler.is_empty() or self._terminate
 
@@ -105,6 +137,23 @@ class Simulator:
 
         for request in requests:
             self._add_event(RequestArrivalEvent(request.arrived_at, request))
+        
+        # Initialize rebalancing for Llumnix scheduler
+        if self._config.cluster_config.global_scheduler_config.get_type() == GlobalSchedulerType.LLUMNIX:
+            llumnix_config = self._config.cluster_config.global_scheduler_config
+            if (hasattr(llumnix_config, 'enable_migration') and 
+                llumnix_config.enable_migration and 
+                self._config.cluster_config.num_replicas > 1):
+                # Schedule first rebalance event
+                initial_rebalance_time = llumnix_config.rebalance_interval
+                self._add_event(RebalanceEvent(initial_rebalance_time))
+                logger.info(
+                    f"Llumnix rebalancing enabled with interval {llumnix_config.rebalance_interval}s"
+                )
+            elif hasattr(llumnix_config, 'enable_migration') and llumnix_config.enable_migration:
+                logger.warning(
+                    f"Llumnix rebalancing disabled: requires at least 2 replicas (found {self._config.cluster_config.num_replicas})"
+                )
 
     def _set_time(self, time: float) -> None:
         self._time = time

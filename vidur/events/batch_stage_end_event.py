@@ -82,5 +82,40 @@ class BatchStageEndEvent(BaseEvent):
             "is_last_stage": self._is_last_stage,
         }
 
-    def to_chrome_trace(self) -> dict:
-        return self._batch_stage.to_chrome_trace(self.time)
+    def to_chrome_trace(self) -> list[dict]:
+        # collect per-request priority if available
+        request_priorities = [getattr(r, "priority", None) for r in self._batch.requests]
+        # collect request IDs
+        request_ids = [r.id for r in self._batch.requests]
+
+        # choose a representative batch priority when all requests share the same priority
+        batch_priority = None
+        if request_priorities:
+            unique_priorities = set(request_priorities)
+            if len(unique_priorities) == 1:
+                batch_priority = request_priorities[0]
+
+        return [{
+            "name": f"Batch {self._batch.id} Stage_id {self._stage_id} | Req_ids: {','.join(map(str, request_ids))}",
+            "ph": "X",
+            "ts": self._batch_stage.scheduled_at * 1e6,  # start time
+            "dur": self._batch_stage.execution_time * 1e6,  # duration
+            "pid": self._replica_id,
+            "tid": self._stage_id,
+            "args": {
+                "batch_id": self._batch.id,
+                "batch_stage_id": self._batch_stage.id,
+                "replica_id": self._replica_id,
+                "stage_id": self._stage_id,
+                "is_last_stage": self._is_last_stage,
+                "size": self._batch.size,
+                "num_prefill_tokens": self._batch.num_prefill_tokens,
+                "num_decode_tokens": self._batch.num_decode_tokens,
+                "batch_priority": batch_priority,
+                "request_priorities": request_priorities,
+                "request_ids": request_ids,
+            },
+        }]
+
+
+
