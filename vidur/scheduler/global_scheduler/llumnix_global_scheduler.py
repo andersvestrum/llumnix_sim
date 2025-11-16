@@ -84,22 +84,23 @@ class LlumnixGlobalScheduler(BaseGlobalScheduler):
 
     # -------------------- New Request Placement (priority-aware) --------------------
     def schedule(self) -> List[Tuple[int, Request]]:
+        """
+        Assign queued requests to replica schedulers based on freeness.
+        """
         if not self._request_queue:
             return []
 
-        by_pr: Dict[int, List[Request]] = {}
+        # Group by priority
+        by_pr = {}
         for req in list(self._request_queue):
             pr = getattr(req, "priority", 0)
             by_pr.setdefault(pr, []).append(req)
         self._request_queue.clear()
 
-        assignments: List[Tuple[int, Request]] = []
-        for pr in sorted(by_pr.keys(), reverse=True):
+        assignments = []
+        for pr in sorted(by_pr.keys()):  # high pri (low pr) first
             for req in by_pr[pr]:
                 rid = self._freest_rid()
-                if rid is None:
-                    continue
-                # No hard capacity gate — rely on llumlet F and migration to make space
                 self._replica_schedulers[rid].enqueue_request(req)
                 assignments.append((rid, req))
         return assignments
@@ -112,9 +113,13 @@ class LlumnixGlobalScheduler(BaseGlobalScheduler):
             return False
         return self._imbalance_gap() >= self._load_imbalance_threshold
 
+
     def rebalance(self, now: float) -> List[Tuple[int, int, int]]:
+        """
+        Returns list of (req_id, src_rid, dst_rid) migrations.
+        """
         self._last_rebalance_time = now
-        migrations: List[Tuple[int, int, int]] = []
+        migrations = []
 
         freeness = sorted(self._all_freeness(), key=lambda x: x[1])
         if len(freeness) < 2:
@@ -125,7 +130,7 @@ class LlumnixGlobalScheduler(BaseGlobalScheduler):
         if (maxF - minF) < self._load_imbalance_threshold:
             return migrations
 
-        # Dynamic thresholds if not configured: take lower/upper quartiles
+        # Compute thresholds dynamically if not configured
         src_thresh = self._src_freeness_threshold
         dst_thresh = self._dst_freeness_threshold
         if src_thresh is None:
@@ -137,6 +142,8 @@ class LlumnixGlobalScheduler(BaseGlobalScheduler):
         dests   = [(rid, F) for rid, F in reversed(freeness) if F >= dst_thresh]
 
         for (src_rid, _), (dst_rid, _) in zip(sources, dests):
+            if src_rid == dst_rid:
+                continue
             src = self._replica_schedulers[src_rid]
             dst = self._replica_schedulers[dst_rid]
             mig = src.begin_migration_to(dst)
@@ -146,9 +153,9 @@ class LlumnixGlobalScheduler(BaseGlobalScheduler):
 
         return migrations
 
+
     # -------------------- Autoscaling signal --------------------
     def autoscale_recommendation(self) -> Optional[str]:
-        """Return 'scale_out', 'scale_in', or None based on average freeness bands."""
         Fs = [F for _, F in self._all_freeness()]
         if not Fs:
             return None
@@ -158,6 +165,7 @@ class LlumnixGlobalScheduler(BaseGlobalScheduler):
         if avgF > self._autoscale_high:
             return "scale_in"
         return None
+
 
     def set_draining(self, replica_ids: List[int], draining: bool = True) -> None:
         for rid in replica_ids:
