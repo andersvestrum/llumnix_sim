@@ -125,7 +125,7 @@ def plot_results(results: dict, out_file: Path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--schedulers", nargs="+", default=["vllm", "orca", "sarathi"])
-    parser.add_argument("--num_requests", type=int, default=64)
+    parser.add_argument("--num_requests", type=int, default=500)
     parser.add_argument("--qps", type=float, default=1.0)
     parser.add_argument("--model", type=str, default="meta-llama/Llama-2-7b-hf")
     parser.add_argument("--device", type=str, default="a100")
