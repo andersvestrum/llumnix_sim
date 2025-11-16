@@ -59,7 +59,8 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
         # Book-keeping for migration and priority-aware logic
         self._request_index: Dict[int, Request] = {}
         self._reservations: Dict[int, int] = {}     # req_id -> reserved_blocks (dest)
-        self._migrations_out: Dict[int, int] = {}   # req_id -> blocks (source, running)
+        self._migrations_out: Dict[int, Tuple["LlumletLocalScheduler", int]] = {}
+        # req_id: (destination_scheduler, num_kv_blocks_for_this_request)
 
         # Optional drain flag (for scale-in)
         self._is_draining: bool = False
@@ -181,51 +182,102 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
 
     def on_batch_end(self, batch: Batch) -> None:
         """
-        Called by BatchEndEvent *after* Batch.on_batch_end(...)
-        has already updated all Request objects.
+        Called after Batch.on_batch_end has updated Request objects.
 
-        We:
-        - free KV
-        - decrement running batch counter
-        - re-enqueue non-completed requests
-        - finalize migrations of running requests if needed
+        Responsibilities:
+        - Free KV used by this batch's requests
+        - Decrement running batch counter
+        - Re-enqueue non-completed requests
+        - Finalize live migrations for running requests
         """
-        # 1) Free KV blocks for all requests in this batch
+        # 1) Free KV for all requests in this batch (including migrating ones)
         self.free_batch(batch)
         self._num_running_batches = max(0, self._num_running_batches - 1)
 
-        # 2) Handle each request in the batch independently
+        # 2) Process each request
         for req in batch.requests:
             req_id = req.id
 
-            # At this point, Batch.on_batch_end has already called
-            # request.on_batch_end(time, num_tokens), so:
-            #   - req.completed is correct
-            #   - req.is_prefill_complete is updated
-            #   - num_processed_tokens is updated
+            # Check if this request was marked for migration
+            mig_entry = self._migrations_out.pop(req_id, None)
 
-            if req.completed:
-                self._request_index.pop(req_id, None)
-                self._migrations_out.pop(req_id, None)
-                self._reservations.pop(req_id, None)
-                logger.debug(f"[Replica {self._replica_id}] Request {req_id} completed.")
-            else:
-                pr = getattr(req, "priority", 0)
-                self._enqueue_seq += 1
-                self._priority_queue.append((pr, self._enqueue_seq, req))
-                self._priority_queue.sort(key=lambda x: (x[0], x[1]))
-                logger.debug(
-                    f"[Replica {self._replica_id}] Request {req_id} re-enqueued after batch."
-                )
+            if mig_entry is not None:
+                # -------------------------
+                # Migration-aware handling
+                # -------------------------
+                dest_sched, blocks = mig_entry
 
-            # Migration handshake finalization for this request, if needed
-            if req_id in self._migrations_out:
-                blocks = self._migrations_out[req_id]
-                if self._dest_commit_if_reserved(req_id, blocks):
-                    self._allocation_map.pop(req_id, None)
+                if req.completed:
+                    # Request finished on the source before migration really happened:
+                    # just cancel the reservation on the destination.
+                    dest_sched._abort_reservation(req_id)
+                    self._request_index.pop(req_id, None)
+                    self._reservations.pop(req_id, None)
+                    logger.info(
+                        f"[Migration] Request {req_id} completed on source replica "
+                        f"{self.replica_id} before migration; aborted reservation on "
+                        f"dest {dest_sched.replica_id}"
+                    )
                 else:
-                    self._abort_reservation(req_id)
-                self._migrations_out.pop(req_id, None)
+                    # Request is still alive and should now move to dest
+                    if dest_sched._dest_commit_if_reserved(req_id, blocks):
+                        # Remove from local indices
+                        self._request_index.pop(req_id, None)
+                        self._reservations.pop(req_id, None)
+
+                        # Remove from local queue if it somehow got re-enqueued
+                        self._priority_queue = [
+                            (pr, seq, r)
+                            for (pr, seq, r) in self._priority_queue
+                            if r.id != req_id
+                        ]
+
+                        # Attach the Request object to the destination scheduler
+                        dest_sched._request_index[req_id] = req
+                        dest_sched.enqueue_request(req)
+
+                        logger.info(
+                            f"[Migration] Request {req_id} completed migration "
+                            f"{self.replica_id} -> {dest_sched.replica_id} "
+                            f"({blocks} blocks)"
+                        )
+                    else:
+                        # Destination failed to commit; abort reservation and keep running here.
+                        dest_sched._abort_reservation(req_id)
+                        logger.info(
+                            f"[Migration] Request {req_id} migration aborted: "
+                            f"dest {dest_sched.replica_id} could not commit; "
+                            f"keeping on source {self.replica_id}"
+                        )
+
+                        # Normal "not completed" behavior: re-enqueue locally
+                        pr = getattr(req, "priority", 0)
+                        self._enqueue_seq += 1
+                        self._priority_queue.append((pr, self._enqueue_seq, req))
+                        self._priority_queue.sort(key=lambda x: (x[0], x[1]))
+                        logger.debug(
+                            f"[Replica {self._replica_id}] Request {req_id} re-enqueued after batch "
+                            f"(migration failed)."
+                        )
+
+            else:
+                # -------------------------
+                # Non-migrating requests
+                # -------------------------
+                if req.completed:
+                    self._request_index.pop(req_id, None)
+                    self._reservations.pop(req_id, None)
+                    logger.debug(f"[Replica {self._replica_id}] Request {req_id} completed.")
+                else:
+                    pr = getattr(req, "priority", 0)
+                    self._enqueue_seq += 1
+                    self._priority_queue.append((pr, self._enqueue_seq, req))
+                    self._priority_queue.sort(key=lambda x: (x[0], x[1]))
+                    logger.debug(
+                        f"[Replica {self._replica_id}] Request {req_id} re-enqueued after batch."
+                    )
+
+
 
     # -------------------- Virtual-usage policy --------------------
     def _virtual_usage_physical(self) -> int:
@@ -332,16 +384,18 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
         Simulated live migration handshake:
         1) Choose candidate (low-pri, small KV).
         2) Reserve blocks on dest.
-        3) If queued: move immediately.
-        4) If running: mark as in-flight; final commit happens after the current
-           batch step ends (in on_batch_end).
+        3) If queued: move immediately (reservation only; dest will allocate later).
+        4) If running: mark as in-flight; final commit happens in on_batch_end.
         """
+        # Compute available space on dest including reservations
         dest_free = dest_scheduler._config.num_blocks - (
-            dest_scheduler._num_allocated_blocks + sum(dest_scheduler._reservations.values() or [])
+            dest_scheduler._num_allocated_blocks +
+            sum(dest_scheduler._reservations.values() or [])
         )
         if dest_free <= 0:
             return None
 
+        # Pick migration candidate
         cand_id = self.decide_migration_candidate(dest_free)
         if cand_id is None:
             logger.debug(
@@ -350,38 +404,58 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
             )
             return None
 
+        # Determine whether request is running or queued
         blocks = self._allocation_map.get(cand_id)
-        # Queued path
+
+        # -----------------------------
+        # Queued request migration path
+        # -----------------------------
         if blocks is None:
             req = self._request_index.get(cand_id)
             if not req:
                 return None
-            blocks = self._blocks_for_request_next_step(req)
-            if self._reserve_on_dest(dest_scheduler, cand_id, blocks):
-                # Move queued request immediately
-                for i, (_pr, _seq, _r) in enumerate(list(self._priority_queue)):
-                    if _r.id == cand_id:
-                        self._priority_queue.pop(i)
-                        break
-                dest_scheduler.enqueue_request(req)
-                dest_scheduler._dest_commit_if_reserved(cand_id, blocks)
-                logger.info(
-                    f"[Migration] Queued req {cand_id} moved from replica {self.replica_id} "
-                    f"-> {dest_scheduler.replica_id} ({blocks} blocks)"
-                )
-                return (cand_id, self.replica_id, dest_scheduler.replica_id)
-            return None
 
-        # Running request path
+            blocks = self._blocks_for_request_next_step(req)
+
+            # Reserve on destination
+            if not self._reserve_on_dest(dest_scheduler, cand_id, blocks):
+                return None
+
+            # Remove from local queue
+            for i, (_pr, _seq, _r) in enumerate(list(self._priority_queue)):
+                if _r.id == cand_id:
+                    self._priority_queue.pop(i)
+                    break
+
+            # Push into destination queue
+            dest_scheduler.enqueue_request(req)
+
+            # NOTE:
+            # DO NOT CALL dest_scheduler._dest_commit_if_reserved() here.
+            # Commitment/allocate happens naturally when dest_scheduler builds a batch.
+            logger.info(
+                f"[Migration] Queued req {cand_id} moved from replica {self.replica_id} "
+                f"-> {dest_scheduler.replica_id} (reserved {blocks} blocks)"
+            )
+
+            return (cand_id, self.replica_id, dest_scheduler.replica_id)
+
+        # -----------------------------
+        # Running request migration path
+        # -----------------------------
         if not self._reserve_on_dest(dest_scheduler, cand_id, blocks):
             return None
 
-        self._migrations_out[cand_id] = blocks
+        # Track destination + blocks so on_batch_end knows where to commit
+        self._migrations_out[cand_id] = (dest_scheduler, blocks)
+
         logger.info(
             f"[Migration] Begin live-migration of req {cand_id} from replica {self.replica_id} "
             f"-> {dest_scheduler.replica_id} (blocks={blocks})"
         )
+
         return (cand_id, self.replica_id, dest_scheduler.replica_id)
+
 
     def set_draining(self, draining: bool) -> None:
         self._is_draining = draining
