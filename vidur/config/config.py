@@ -330,6 +330,17 @@ class SarathiSchedulerConfig(BaseReplicaSchedulerConfig):
     @staticmethod
     def get_type():
         return ReplicaSchedulerType.SARATHI
+    
+@dataclass
+class LlumletSchedulerConfig(BaseReplicaSchedulerConfig):
+    max_tokens_in_batch: int = field(
+        default=2048,
+        metadata={"help": "Maximum tokens per batch for Llumnlet."},
+    )
+
+    @staticmethod
+    def get_type():
+        return ReplicaSchedulerType.LLUMLET
 
 
 @dataclass

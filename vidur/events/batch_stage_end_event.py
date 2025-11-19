@@ -85,23 +85,38 @@ class BatchStageEndEvent(BaseEvent):
     def to_chrome_trace(self) -> list[dict]:
         # collect per-request priority if available
         request_priorities = [getattr(r, "priority", None) for r in self._batch.requests]
-        # collect request IDs
         request_ids = [r.id for r in self._batch.requests]
 
-        # choose a representative batch priority when all requests share the same priority
         batch_priority = None
         if request_priorities:
             unique_priorities = set(request_priorities)
             if len(unique_priorities) == 1:
                 batch_priority = request_priorities[0]
 
+        # -------------------------------
+        # ★ Add temperature color support
+        # -------------------------------
+        # We need access to the scheduler, so retrieve via global scheduler lookup
+        try:
+            # GlobalScheduler must expose get_replica_scheduler(replica_id)
+            replica_sched = BaseEvent.global_scheduler_ref.get_replica_scheduler(
+                self._replica_id
+            )
+            color = replica_sched._temperature_color()
+        except Exception:
+            color = "grey"
+
         return [{
-            "name": f"Batch {self._batch.id} Stage_id {self._stage_id} | Req_ids: {','.join(map(str, request_ids))}",
+            "name": (
+                f"Batch {self._batch.id} Stage_id {self._stage_id} | "
+                f"Req_ids: {','.join(map(str, request_ids))}"
+            ),
             "ph": "X",
-            "ts": self._batch_stage.scheduled_at * 1e6,  # start time
-            "dur": self._batch_stage.execution_time * 1e6,  # duration
+            "ts": self._batch_stage.scheduled_at * 1e6,
+            "dur": self._batch_stage.execution_time * 1e6,
             "pid": self._replica_id,
             "tid": self._stage_id,
+            "cname": color,          # ★ Insert color field here
             "args": {
                 "batch_id": self._batch.id,
                 "batch_stage_id": self._batch_stage.id,
@@ -116,6 +131,3 @@ class BatchStageEndEvent(BaseEvent):
                 "request_ids": request_ids,
             },
         }]
-
-
-
