@@ -537,20 +537,22 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
     def _temperature_color(self) -> str:
         """
         Chrome trace color bucket based on temperature.
-        Maps temperature → Chrome trace color name.
+        Maps temperature → Chrome trace *reserved* color name.
         """
         t = self._compute_temperature()
 
+        # Must use only allowed Chrome names
+        # (see color_scheme for trace viewer)
         if t < 0.25:
-            return "good"      # green
+            return "good"              # green
         elif t < 0.50:
-            return "calm"      # light green
+            return "rail_idle"         # light green
         elif t < 0.75:
-            return "warning"   # yellow
+            return "rail_animation"    # yellow
         elif t < 0.90:
-            return "caution"   # orange
+            return "terrible"          # orange
         else:
-            return "bad"       # red
+            return "bad"               # red
 
     def _emit_chrome_trace_batch(self, batch: Batch, start_time: float, end_time: float) -> None:
         """
