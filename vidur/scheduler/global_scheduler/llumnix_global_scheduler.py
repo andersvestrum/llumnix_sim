@@ -19,6 +19,7 @@ class LlumnixGlobalScheduler(BaseGlobalScheduler):
 
     def __init__(self, config: SimulationConfig, replicas) -> None:
         # Manually set up base fields
+        super().__init__(config, replicas)
         self._config = config
         self._replicas = replicas
         self._num_replicas = len(replicas)
@@ -85,25 +86,51 @@ class LlumnixGlobalScheduler(BaseGlobalScheduler):
     # -------------------- New Request Placement (priority-aware) --------------------
     def schedule(self) -> List[Tuple[int, Request]]:
         """
-        Assign queued requests to replica schedulers based on freeness.
+        Llumnix-compliant request placement:
+        • never place new requests on draining replicas
+        • choose among non-draining replicas with highest freeness
+        • if all replicas are draining, place on the least-bad (highest freeness)
+        • preserve priority ordering
         """
         if not self._request_queue:
             return []
 
-        # Group by priority
-        by_pr = {}
-        for req in list(self._request_queue):
+        # --- Group by priority (0 = highest) ---
+        by_pr: Dict[int, List[Request]] = {}
+        for req in self._request_queue:
             pr = getattr(req, "priority", 0)
             by_pr.setdefault(pr, []).append(req)
         self._request_queue.clear()
 
-        assignments = []
-        for pr in sorted(by_pr.keys()):  # high pri (low pr) first
+        assignments: List[Tuple[int, Request]] = []
+
+        # Sort priority buckets: low number = high priority
+        for pr in sorted(by_pr.keys()):
             for req in by_pr[pr]:
-                rid = self._freest_rid()
+
+                # 1. Select target replica among *non-draining* ones
+                candidates = [
+                    (rid, sch.report_freeness())
+                    for rid, sch in self._replica_schedulers.items()
+                    if not sch._is_draining
+                ]
+
+                if not candidates:
+                    # Fallback: all replicas are draining → place on best available
+                    candidates = [
+                        (rid, sch.report_freeness())
+                        for rid, sch in self._replica_schedulers.items()
+                    ]
+
+                # Pick replica with max F
+                rid = max(candidates, key=lambda x: x[1])[0]
+
+                # Send request
                 self._replica_schedulers[rid].enqueue_request(req)
                 assignments.append((rid, req))
+
         return assignments
+
 
     # -------------------- Migration Triggering --------------------
     def should_rebalance(self, now: float) -> bool:
@@ -130,28 +157,57 @@ class LlumnixGlobalScheduler(BaseGlobalScheduler):
         if (maxF - minF) < self._load_imbalance_threshold:
             return migrations
 
-        # Compute thresholds dynamically if not configured
-        src_thresh = self._src_freeness_threshold
-        dst_thresh = self._dst_freeness_threshold
-        if src_thresh is None:
-            src_thresh = minF + 0.1  # overloaded
-        if dst_thresh is None:
-            dst_thresh = maxF - 0.1  # underloaded
+        # dynamic thresholds if user doesn't specify
+        src_thresh = self._src_freeness_threshold or (minF + 0.1)
+        dst_thresh = self._dst_freeness_threshold or (maxF - 0.1)
 
-        sources = [(rid, F) for rid, F in freeness if F <= src_thresh]
-        dests   = [(rid, F) for rid, F in reversed(freeness) if F >= dst_thresh]
+        # -------------------------------
+        # Sources: overloaded OR draining
+        # -------------------------------
+        sources = []
+        for rid, F in freeness:
+            sch = self._replica_schedulers[rid]
 
+            if sch._is_draining:
+                # draining replica evacuates only if it has any work
+                if sch._priority_queue or sch._allocation_map:
+                    sources.append((rid, F))
+
+            elif F <= src_thresh:
+                # overloaded replica
+                sources.append((rid, F))
+
+        # -------------------------------
+        # Destinations: underloaded, not draining
+        # -------------------------------
+        dests = [
+            (rid, F)
+            for rid, F in reversed(freeness)
+            if (F >= dst_thresh) and not self._replica_schedulers[rid]._is_draining
+        ]
+
+        # -------------------------------
+        # Pair sources → dests
+        # -------------------------------
         for (src_rid, _), (dst_rid, _) in zip(sources, dests):
+
             if src_rid == dst_rid:
                 continue
+
             src = self._replica_schedulers[src_rid]
             dst = self._replica_schedulers[dst_rid]
+
+            # redundant safety check
+            if dst._is_draining:
+                continue
+
             mig = src.begin_migration_to(dst)
             if mig:
                 migrations.append(mig)
                 self._migration_count += 1
 
         return migrations
+
 
 
     # -------------------- Autoscaling signal --------------------
@@ -181,3 +237,28 @@ class LlumnixGlobalScheduler(BaseGlobalScheduler):
             "imbalance_gap": self._imbalance_gap(),
             "autoscale": self.autoscale_recommendation(),
         }
+    
+
+    def _make_replica_schedule_event(self, rid, batch):
+        from vidur.events import ReplicaScheduleEvent
+        t = self.current_time  # or however BaseGlobalScheduler tracks time
+        return ReplicaScheduleEvent(t, rid, batch)
+
+
+    def step(self):
+        events = []
+
+        # 1. Place any remaining global requests
+        assignments = self.schedule()
+        # (assignments are ignored for event creation)
+
+        # 2. Ask each replica for a batch
+        for rid, sched in self._replica_schedulers.items():
+            batch = sched._get_next_batch()
+            if batch:
+                events.append(self._make_replica_schedule_event(rid, batch))
+
+        return events
+
+
+

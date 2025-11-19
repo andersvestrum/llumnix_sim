@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple, Dict, Any
 import math
 
 from vidur.entities import Request, Batch
@@ -58,9 +58,17 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
 
         # Book-keeping for migration and priority-aware logic
         self._request_index: Dict[int, Request] = {}
-        self._reservations: Dict[int, int] = {}     # req_id -> reserved_blocks (dest)
-        self._migrations_out: Dict[int, Tuple["LlumletLocalScheduler", int]] = {}
-        # req_id: (destination_scheduler, num_kv_blocks_for_this_request)
+        # Reservations local to this replica (used when this replica is the *destination*)
+        self._reservations: Dict[int, int] = {}  # req_id -> reserved_blocks
+
+        # Multi-stage migration state for outgoing migrations:
+        # req_id -> {
+        #   "dest": LlumletLocalScheduler,
+        #   "blocks": int,
+        #   "stages_total": int,
+        #   "stages_done": int,
+        # }
+        self._migrations_out: Dict[int, Dict[str, Any]] = {}
 
         # Optional drain flag (for scale-in)
         self._is_draining: bool = False
@@ -71,6 +79,8 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
         self._high_priority_threshold: int = getattr(cfg, "high_priority_threshold", 1)
         # Batch normalization denominator B (blocks per batch)
         self._batch_normalizer_B: int = getattr(cfg, "batch_blocks", 1) or 1
+        # Migration stage granularity: how many KV blocks per migration stage
+        self._migration_stage_blocks: int = getattr(cfg, "migration_stage_blocks", 1) or 1
 
     # -------------------- Queueing & batching --------------------
     def enqueue_request(self, request: Request) -> None:
@@ -104,12 +114,14 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
         return self._priority_queue[0][2]
 
     def _blocks_for_request_next_step(self, req: Request) -> int:
-        """
-        Map 'next num tokens' (prefill or 1 decode) to KV blocks.
-        """
-        num_tokens = self._get_request_next_num_tokens(req)
-        block = max(1, getattr(self._config, "block_size", 1))
-        return max(1, math.ceil(num_tokens / block))
+        # Prefill: allocate KV footprint
+        if not req.is_prefill_complete:
+            tokens = req.num_prefill_tokens
+            block = getattr(self._config, "block_size", 1)
+            return max(1, math.ceil(tokens / block))
+
+        # Decode: no new KV blocks needed
+        return 0
 
     def _get_next_batch(self) -> Optional[Batch]:
         """
@@ -184,100 +196,111 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
         """
         Called after Batch.on_batch_end has updated Request objects.
 
-        Responsibilities:
-        - Free KV used by this batch's requests
-        - Decrement running batch counter
-        - Re-enqueue non-completed requests
-        - Finalize live migrations for running requests
+        CRITICAL FIX: Properly manage KV allocation lifecycle during migration.
         """
-        # 1) Free KV for all requests in this batch (including migrating ones)
-        self.free_batch(batch)
+        # 1) Decrement running batch counter FIRST
         self._num_running_batches = max(0, self._num_running_batches - 1)
 
-        # 2) Process each request
+        # 2) Process each request in the batch
         for req in batch.requests:
             req_id = req.id
+            mig_state = self._migrations_out.get(req_id)
 
-            # Check if this request was marked for migration
-            mig_entry = self._migrations_out.pop(req_id, None)
+            # Get current allocation (will be freed at end of this block)
+            current_blocks = self._allocation_map.get(req_id, 0)
 
-            if mig_entry is not None:
-                # -------------------------
-                # Migration-aware handling
-                # -------------------------
-                dest_sched, blocks = mig_entry
+            # Requests with migration state (multi-stage live migration)
+            if mig_state is not None:
+                dest_sched: "LlumletLocalScheduler" = mig_state["dest"]
+                blocks: int = mig_state["blocks"]
+                stages_total: int = mig_state["stages_total"]
+                stages_done: int = mig_state["stages_done"]
 
                 if req.completed:
-                    # Request finished on the source before migration really happened:
-                    # just cancel the reservation on the destination.
+                    # Request finished before migration completed → abort.
+                    self.free(req_id)  # FREE FIRST
                     dest_sched._abort_reservation(req_id)
+                    self._migrations_out.pop(req_id, None)
                     self._request_index.pop(req_id, None)
-                    self._reservations.pop(req_id, None)
                     logger.info(
                         f"[Migration] Request {req_id} completed on source replica "
-                        f"{self.replica_id} before migration; aborted reservation on "
-                        f"dest {dest_sched.replica_id}"
+                        f"{self.replica_id} before migration finished; aborted."
                     )
-                else:
-                    # Request is still alive and should now move to dest
-                    if dest_sched._dest_commit_if_reserved(req_id, blocks):
-                        # Remove from local indices
-                        self._request_index.pop(req_id, None)
-                        self._reservations.pop(req_id, None)
+                    continue
 
-                        # Remove from local queue if it somehow got re-enqueued
-                        self._priority_queue = [
-                            (pr, seq, r)
-                            for (pr, seq, r) in self._priority_queue
-                            if r.id != req_id
-                        ]
+                # Advance migration stage
+                stages_done += 1
+                mig_state["stages_done"] = stages_done
 
-                        # Attach the Request object to the destination scheduler
-                        dest_sched._request_index[req_id] = req
-                        dest_sched.enqueue_request(req)
-
-                        logger.info(
-                            f"[Migration] Request {req_id} completed migration "
-                            f"{self.replica_id} -> {dest_sched.replica_id} "
-                            f"({blocks} blocks)"
-                        )
-                    else:
-                        # Destination failed to commit; abort reservation and keep running here.
-                        dest_sched._abort_reservation(req_id)
-                        logger.info(
-                            f"[Migration] Request {req_id} migration aborted: "
-                            f"dest {dest_sched.replica_id} could not commit; "
-                            f"keeping on source {self.replica_id}"
-                        )
-
-                        # Normal "not completed" behavior: re-enqueue locally
-                        pr = getattr(req, "priority", 0)
-                        self._enqueue_seq += 1
-                        self._priority_queue.append((pr, self._enqueue_seq, req))
-                        self._priority_queue.sort(key=lambda x: (x[0], x[1]))
-                        logger.debug(
-                            f"[Replica {self._replica_id}] Request {req_id} re-enqueued after batch "
-                            f"(migration failed)."
-                        )
-
-            else:
-                # -------------------------
-                # Non-migrating requests
-                # -------------------------
-                if req.completed:
-                    self._request_index.pop(req_id, None)
-                    self._reservations.pop(req_id, None)
-                    logger.debug(f"[Replica {self._replica_id}] Request {req_id} completed.")
-                else:
+                if stages_done < stages_total:
+                    # Still copying KV; free current batch allocation, re-enqueue
+                    self.free(req_id)  # FREE BEFORE RE-ENQUEUE
+                    
                     pr = getattr(req, "priority", 0)
                     self._enqueue_seq += 1
                     self._priority_queue.append((pr, self._enqueue_seq, req))
                     self._priority_queue.sort(key=lambda x: (x[0], x[1]))
                     logger.debug(
-                        f"[Replica {self._replica_id}] Request {req_id} re-enqueued after batch."
+                        f"[Replica {self._replica_id}] Request {req_id} migration stage "
+                        f"{stages_done}/{stages_total}; freed & re-enqueued."
+                    )
+                    continue
+
+                # Final stage: attempt commit on destination
+                if dest_sched._dest_commit_if_reserved(req_id, blocks):
+                    # SUCCESS: free on source, remove tracking
+                    self.free(req_id)
+                    self._migrations_out.pop(req_id, None)
+                    self._request_index.pop(req_id, None)
+
+                    # Remove from queue if somehow still there
+                    self._priority_queue = [
+                        (pr, seq, r) for (pr, seq, r) in self._priority_queue
+                        if r.id != req_id
+                    ]
+
+                    # Add to destination
+                    dest_sched._request_index[req_id] = req
+                    dest_sched.enqueue_request(req)
+
+                    logger.info(
+                        f"[Migration] Request {req_id} completed migration "
+                        f"{self.replica_id} -> {dest_sched.replica_id}"
+                    )
+                else:
+                    # FAILED: abort, free blocks, keep on source
+                    self.free(req_id)  # FREE BEFORE RE-ENQUEUE
+                    dest_sched._abort_reservation(req_id)
+                    self._migrations_out.pop(req_id, None)
+
+                    pr = getattr(req, "priority", 0)
+                    self._enqueue_seq += 1
+                    self._priority_queue.append((pr, self._enqueue_seq, req))
+                    self._priority_queue.sort(key=lambda x: (x[0], x[1]))
+                    logger.info(
+                        f"[Migration] Request {req_id} migration aborted at final stage; "
+                        f"freed & kept on source {self.replica_id}"
                     )
 
+                continue  # done with migrating request
 
+            # Non-migrating requests
+            if req.completed:
+                self.free(req_id)  # FREE COMPLETED REQUEST
+                self._request_index.pop(req_id, None)
+                self._reservations.pop(req_id, None)
+                logger.debug(f"[Replica {self._replica_id}] Request {req_id} completed & freed.")
+            else:
+                # FREE BEFORE RE-ENQUEUE
+                self.free(req_id)
+                
+                pr = getattr(req, "priority", 0)
+                self._enqueue_seq += 1
+                self._priority_queue.append((pr, self._enqueue_seq, req))
+                self._priority_queue.sort(key=lambda x: (x[0], x[1]))
+                logger.debug(
+                    f"[Replica {self._replica_id}] Request {req_id} freed & re-enqueued."
+                )
 
     # -------------------- Virtual-usage policy --------------------
     def _virtual_usage_physical(self) -> int:
@@ -381,16 +404,25 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
 
     def begin_migration_to(self, dest_scheduler: "LlumletLocalScheduler") -> Optional[Tuple[int, int, int]]:
         """
-        Simulated live migration handshake:
+        Llumnix-style multi-stage live migration:
+
         1) Choose candidate (low-pri, small KV).
-        2) Reserve blocks on dest.
-        3) If queued: move immediately (reservation only; dest will allocate later).
-        4) If running: mark as in-flight; final commit happens in on_batch_end.
+        2) If queued: cold-migrate immediately (no staging).
+        3) If running: set up multi-stage migration state; each batch advances one stage.
         """
-        # Compute available space on dest including reservations
+
+        # PRE-FLIGHT VALIDATION
+        def request_exists(req_id: int) -> bool:
+            return (
+                req_id in self._request_index
+                or req_id in self._allocation_map
+                or any(_r.id == req_id for (_p, _s, _r) in self._priority_queue)
+            )
+
+        # Compute free space on dest (including reservations)
         dest_free = dest_scheduler._config.num_blocks - (
             dest_scheduler._num_allocated_blocks +
-            sum(dest_scheduler._reservations.values() or [])
+            sum(dest_scheduler._reservations.values())
         )
         if dest_free <= 0:
             return None
@@ -398,64 +430,150 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
         # Pick migration candidate
         cand_id = self.decide_migration_candidate(dest_free)
         if cand_id is None:
-            logger.debug(
-                f"[Replica {self.replica_id}] No suitable migration candidate "
-                f"found for dest {dest_scheduler.replica_id}"
+            return None
+
+        if not request_exists(cand_id):
+            logger.warning(
+                f"[Migration] Skipped migration of req {cand_id}: request no longer exists "
+                f"on replica {self.replica_id}"
             )
             return None
 
-        # Determine whether request is running or queued
+        # Determine whether running or queued
         blocks = self._allocation_map.get(cand_id)
 
-        # -----------------------------
-        # Queued request migration path
-        # -----------------------------
+        # QUEUED REQUEST MIGRATION (cold)
         if blocks is None:
             req = self._request_index.get(cand_id)
             if not req:
+                logger.warning(
+                    f"[Migration] Skipped: request {cand_id} vanished before migration "
+                    f"from replica {self.replica_id}"
+                )
                 return None
 
             blocks = self._blocks_for_request_next_step(req)
 
-            # Reserve on destination
-            if not self._reserve_on_dest(dest_scheduler, cand_id, blocks):
-                return None
-
-            # Remove from local queue
+            # Remove from queue
+            removed = False
             for i, (_pr, _seq, _r) in enumerate(list(self._priority_queue)):
                 if _r.id == cand_id:
                     self._priority_queue.pop(i)
+                    removed = True
                     break
+
+            if not removed:
+                logger.warning(
+                    f"[Migration] Request {cand_id} not found in queue during migration "
+                    f"on replica {self.replica_id} — skipping"
+                )
+                return None
 
             # Push into destination queue
             dest_scheduler.enqueue_request(req)
 
-            # NOTE:
-            # DO NOT CALL dest_scheduler._dest_commit_if_reserved() here.
-            # Commitment/allocate happens naturally when dest_scheduler builds a batch.
             logger.info(
-                f"[Migration] Queued req {cand_id} moved from replica {self.replica_id} "
-                f"-> {dest_scheduler.replica_id} (reserved {blocks} blocks)"
+                f"[Migration] Queued req {cand_id} cold-migrated from replica {self.replica_id} "
+                f"-> {dest_scheduler.replica_id} (blocks={blocks})"
             )
 
             return (cand_id, self.replica_id, dest_scheduler.replica_id)
 
-        # -----------------------------
-        # Running request migration path
-        # -----------------------------
+        # ----------------------------
+        # RUNNING REQUEST MIGRATION (multi-stage)
+        req = self._request_index.get(cand_id)
+        if not req:
+            return None
+
+        # If already migrating, don't double-start
+        if cand_id in self._migrations_out:
+            return None
+
+        # Reserve full KV footprint on destination
         if not self._reserve_on_dest(dest_scheduler, cand_id, blocks):
             return None
 
-        # Track destination + blocks so on_batch_end knows where to commit
-        self._migrations_out[cand_id] = (dest_scheduler, blocks)
+        stages_total = max(1, math.ceil(blocks / self._migration_stage_blocks))
+
+        self._migrations_out[cand_id] = {
+            "dest": dest_scheduler,
+            "blocks": blocks,
+            "stages_total": stages_total,
+            "stages_done": 0,
+        }
 
         logger.info(
-            f"[Migration] Begin live-migration of req {cand_id} from replica {self.replica_id} "
-            f"-> {dest_scheduler.replica_id} (blocks={blocks})"
+            f"[Migration] Running req {cand_id} scheduled for multi-stage migration "
+            f"{self.replica_id} -> {dest_scheduler.replica_id} "
+            f"(blocks={blocks}, stages={stages_total})"
         )
 
         return (cand_id, self.replica_id, dest_scheduler.replica_id)
 
-
     def set_draining(self, draining: bool) -> None:
         self._is_draining = draining
+
+    def is_empty(self) -> bool:
+        """
+        Replica is empty when:
+          • no queued requests
+          • no running/allocated requests
+          • no in-flight migrations
+        """
+        return (
+            len(self._priority_queue) == 0
+            and len(self._allocation_map) == 0
+            and len(self._migrations_out) == 0
+        )
+
+    def _compute_temperature(self) -> float:
+        """
+        Returns a 0..1 temperature based on virtual usage divided by capacity.
+        """
+        M = max(1, self._config.num_blocks)
+        usage = min(self._sum_virtual_usage(), M)
+        return usage / M
+
+    def _temperature_color(self) -> str:
+        """
+        Chrome trace color bucket based on temperature.
+        Maps temperature → Chrome trace color name.
+        """
+        t = self._compute_temperature()
+
+        if t < 0.25:
+            return "good"      # green
+        elif t < 0.50:
+            return "calm"      # light green
+        elif t < 0.75:
+            return "warning"   # yellow
+        elif t < 0.90:
+            return "caution"   # orange
+        else:
+            return "bad"       # red
+
+    def _emit_chrome_trace_batch(self, batch: Batch, start_time: float, end_time: float) -> None:
+        """
+        Override Vidur's default batch trace emit to include:
+        - KV virtual usage visualization
+        - Temperature color
+        """
+        temperature = self._compute_temperature()
+
+        args = {
+            "temperature": temperature,
+            "virtual_usage": self._sum_virtual_usage(),
+            "physical_usage": self._virtual_usage_physical(),
+            "hol_demand": self._virtual_usage_hol_demand(),
+            "priority_headroom": self._virtual_usage_priority_headroom(),
+            "num_requests": len(batch.requests),
+        }
+
+        self._emit_trace_event(
+            name="batch",
+            category="schedule",
+            start_time=start_time,
+            end_time=end_time,
+            cname=self._temperature_color(),   # COLOR GOES HERE
+            args=args,
+        )
