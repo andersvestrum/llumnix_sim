@@ -122,17 +122,19 @@ def run_all_tests() -> None:
     if api_key:
         wandb.login(key=api_key)
 
-    wandb_run = wandb.init(
-        project=os.getenv("WANDB_PROJECT", "llumnix"),
-        entity=os.getenv("WANDB_ENTITY"),
-        mode=os.getenv("WANDB_MODE", "online"),
-        name=os.getenv("WANDB_RUN_NAME", "latency_test_suite"),
-        config={"num_tests": len(LATENCY_TESTS)},
-    )
-
     for idx, test in enumerate(LATENCY_TESTS):
         name = test["name"]
         desc = test.get("description", "")
+        run_name = os.getenv("WANDB_RUN_NAME", name)
+
+        wandb_run = wandb.init(
+            project=os.getenv("WANDB_PROJECT", "llumnix"),
+            entity=os.getenv("WANDB_ENTITY"),
+            mode=os.getenv("WANDB_MODE", "online"),
+            name=run_name,
+            group=os.getenv("WANDB_GROUP"),
+            config={"test_name": name, "description": desc, "num_tests": len(LATENCY_TESTS)},
+        )
 
         # Direct outputs for this scenario under simulator_output/<name>/...
         base_root = Path("simulator_output") / name
@@ -163,8 +165,8 @@ def run_all_tests() -> None:
             step=idx,
         )
 
-    if wandb_run:
-        wandb_run.finish()
+        if wandb_run:
+            wandb_run.finish()
 
 
 if __name__ == "__main__":

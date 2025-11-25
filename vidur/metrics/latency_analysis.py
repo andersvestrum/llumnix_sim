@@ -29,6 +29,25 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
+try:
+    import wandb
+except ImportError:  # pragma: no cover - optional dependency at runtime
+    wandb = None
+
+
+def _wandb_image(path: Path, key: str) -> None:
+    """Log an image to an active wandb run if available."""
+    if wandb is None or not wandb.run:
+        return
+    wandb.log({key: wandb.Image(str(path))}, commit=False)
+
+
+def _wandb_metrics(namespace: str, metrics: Dict[str, float]) -> None:
+    """Log scalar metrics under a namespace to an active wandb run if available."""
+    if wandb is None or not wandb.run or not metrics:
+        return
+    wandb.log({f"{namespace}/{k}": v for k, v in metrics.items()}, commit=False)
+
 
 def _find_latest_run(sim_output_root: Path) -> Path:
     """Pick the newest directory inside simulator_output/."""
@@ -136,6 +155,10 @@ def _plot_cdf(
     plt.savefig(output_path)
     plt.close()
     print(f"[info] Wrote {output_path}")
+    _wandb_image(output_path, f"plots/{output_path.name}")
+    _wandb_image(output_path, f"plots/{output_path.name}")
+    _wandb_image(output_path, f"plots/{output_path.name}")
+    _wandb_image(output_path, f"plots/{output_path.name}")
 
 
 def _plot_hist(
@@ -167,6 +190,10 @@ def _plot_hist(
     plt.savefig(output_path)
     plt.close()
     print(f"[info] Wrote {output_path}")
+    _wandb_image(output_path, f"plots/{output_path.name}")
+    _wandb_image(output_path, f"plots/{output_path.name}")
+    _wandb_image(output_path, f"plots/{output_path.name}")
+    _wandb_image(output_path, f"plots/{output_path.name}")
 
 
 def _plot_box_violin(
@@ -191,6 +218,7 @@ def _plot_box_violin(
     plt.savefig(output_box)
     plt.close()
     print(f"[info] Wrote {output_box}")
+    _wandb_image(output_box, f"plots/{output_box.name}")
 
     plt.figure(figsize=(8, 5))
     sns.violinplot(data=df, x="priority", y=value_col, cut=0, scale="width")
@@ -201,6 +229,7 @@ def _plot_box_violin(
     plt.savefig(output_violin)
     plt.close()
     print(f"[info] Wrote {output_violin}")
+    _wandb_image(output_violin, f"plots/{output_violin.name}")
 
 
 def _plot_timeseries(
@@ -319,6 +348,17 @@ def _print_stats(df: pd.DataFrame, value_col: str, label: str) -> None:
             f"  prio {prio}: n={int(desc['count'])}, "
             f"mean={desc['mean']:.4f}, p50={desc['50%']:.4f}, "
             f"p90={desc['90%']:.4f}, p95={desc['95%']:.4f}, p99={desc['99%']:.4f}"
+        )
+        _wandb_metrics(
+            f"stats/{label.lower()}",
+            {
+                f"prio_{prio}_count": float(desc["count"]),
+                f"prio_{prio}_mean": float(desc["mean"]),
+                f"prio_{prio}_p50": float(desc["50%"]),
+                f"prio_{prio}_p90": float(desc["90%"]),
+                f"prio_{prio}_p95": float(desc["95%"]),
+                f"prio_{prio}_p99": float(desc["99%"]),
+            },
         )
 
 
