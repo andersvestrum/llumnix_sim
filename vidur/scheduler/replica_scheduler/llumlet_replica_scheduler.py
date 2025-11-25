@@ -82,7 +82,20 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
         # Migration stage granularity: how many KV blocks per migration stage
         self._migration_stage_blocks: int = getattr(cfg, "migration_stage_blocks", 1) or 1
 
+    # -------------------- Properties --------------------
+    @property
+    def num_pending_requests(self) -> int:
+        """Override to use our priority queue instead of base _request_queue."""
+        return len(self._priority_queue)
+
     # -------------------- Queueing & batching --------------------
+    def add_request(self, request: Request) -> None:
+        """
+        Override BaseReplicaScheduler.add_request() to use our priority queue.
+        This is called by the global scheduler when assigning requests to replicas.
+        """
+        self.enqueue_request(request)
+
     def enqueue_request(self, request: Request) -> None:
         """
         Insert request into priority queue.

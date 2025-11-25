@@ -2,11 +2,11 @@
 """Run short simulations for multiple replica schedulers and plot comparison.
 
 This script is a convenience wrapper to run the simulator (`python -m vidur.main`)
-for a small synthetic workload with different replica schedulers (vllm, orca, sarathi)
+for a small synthetic workload with different replica schedulers (vllm, orca, sarathi, llumlet)
 and produce a small CSV + PNG comparing latency percentiles (P50, P90, P99).
 
 Usage examples:
-  python scripts/compare_schedulers.py --schedulers vllm orca sarathi
+  python scripts/compare_schedulers.py --schedulers vllm orca sarathi llumlet
 
 Notes:
  - The script disables wandb via the WANDB_MODE env var to avoid external logging.
@@ -68,8 +68,12 @@ def run_simulation_for_scheduler(scheduler: str, out_dir: Path, args):
         cmd += ["--sarathi_scheduler_config_chunk_size", str(args.sarathi_chunk_size)]
 
     # batch-cap flags for common schedulers
-    cap_flag = f"--{scheduler}_scheduler_config_batch_size_cap"
-    cmd += [cap_flag, str(args.batch_cap)]
+    if scheduler.lower() == "llumlet":
+        # llumlet uses max_tokens_in_batch instead of batch_size_cap
+        cmd += ["--llumlet_scheduler_config_max_tokens_in_batch", str(args.llumlet_max_tokens)]
+    else:
+        cap_flag = f"--{scheduler}_scheduler_config_batch_size_cap"
+        cmd += [cap_flag, str(args.batch_cap)]
 
     env = os.environ.copy()
     env["WANDB_MODE"] = "disabled"
@@ -116,6 +120,12 @@ def plot_results(results: dict, out_file: Path):
     ax.set_ylabel("Request E2E latency (s)")
     ax.set_title("Scheduler comparison — latency percentiles")
     ax.grid(axis="y", linestyle="--", alpha=0.5)
+    
+    # Set y-axis to start from minimum value for better granularity
+    y_min = plot_df.min().min() * 0.95  # Start 5% below minimum
+    y_max = plot_df.max().max() * 1.05  # End 5% above maximum
+    ax.set_ylim(y_min, y_max)
+    
     plt.tight_layout()
     out_file.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(out_file)
@@ -124,7 +134,7 @@ def plot_results(results: dict, out_file: Path):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--schedulers", nargs="+", default=["vllm", "orca", "sarathi"])
+    parser.add_argument("--schedulers", nargs="+", default=["vllm", "orca", "sarathi", "llumlet"])
     parser.add_argument("--num_requests", type=int, default=500)
     parser.add_argument("--qps", type=float, default=1.0)
     parser.add_argument("--model", type=str, default="meta-llama/Llama-2-7b-hf")
@@ -132,10 +142,11 @@ def main():
     parser.add_argument("--replicas", type=int, default=1)
     parser.add_argument("--tp", type=int, default=1)
     parser.add_argument("--pp", type=int, default=1)
-    parser.add_argument("--prefill_tokens", type=int, default=2048)
-    parser.add_argument("--decode_tokens", type=int, default=512)
+    parser.add_argument("--prefill_tokens", type=int, default=512)
+    parser.add_argument("--decode_tokens", type=int, default=128)
     parser.add_argument("--sarathi_chunk_size", type=int, default=512)
     parser.add_argument("--batch_cap", type=int, default=64)
+    parser.add_argument("--llumlet_max_tokens", type=int, default=2048)
     parser.add_argument("--results_dir", type=str, default="results/scheduler_cmp")
     parser.add_argument("--skip_run", action="store_true", help="Skip running sims; only plot from existing output dirs")
     parser.add_argument("--existing_output_dirs", nargs="*", help="If skipping run, pass a list of simulator output dirs to include (overrides default naming)")
