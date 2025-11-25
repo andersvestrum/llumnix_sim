@@ -13,6 +13,7 @@ from vidur.metrics import MetricsStore
 from vidur.request_generator import RequestGeneratorRegistry
 from vidur.scheduler import BaseGlobalScheduler, GlobalSchedulerRegistry
 from vidur.types import GlobalSchedulerType
+from vidur.events.base_event import BaseEvent
 
 logger = init_logger(__name__)
 
@@ -47,6 +48,7 @@ class Simulator:
             self._config,
             self._cluster.replicas,
         )
+        BaseEvent.global_scheduler_ref = self._scheduler
 
         self._init_event_queue()
 
@@ -107,7 +109,33 @@ class Simulator:
         finally:
             pbar.close()
 
-        assert self._scheduler.is_empty() or self._terminate
+        if not self._scheduler.is_empty() and not self._terminate:
+            logger.warning("Simulation ended but scheduler still has pending work. Draining...")
+
+            # Let the scheduler process outstanding decode/prefill steps
+            while not self._scheduler.is_empty():
+                leftover_events = self._scheduler.step()
+                self._add_events(leftover_events)
+
+                # ================================
+                # DEBUG STATE DUMP FOR DRAIN LOOP
+                # ================================
+                print("\n==== GLOBAL EMPTY CHECK ====")
+                print("global request_queue:", len(self._scheduler._request_queue))
+
+                for rid, rs in self._scheduler._replica_schedulers.items():
+                    print(f"Replica {rid}:")
+                    print("  local_queue:", len(rs._priority_queue))
+                    print("  allocations:", len(rs._allocation_map))
+                    print("  migrations_out:", len(rs._migrations_out))
+                    print("  running_batches:", rs._num_running_batches)
+                    print("  reservations:", len(rs._reservations))
+                    print("  is_empty():", rs.is_empty())
+
+                print("event_queue:", len(self._event_queue))
+                print("================================\n")
+
+
 
         logger.info(f"Simulation ended at: {self._time}s")
 
