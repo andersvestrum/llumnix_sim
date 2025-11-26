@@ -71,6 +71,20 @@ class LlumnixGlobalScheduler(BaseGlobalScheduler):
     def _all_freeness(self) -> List[Tuple[int, float]]:
         return [(rid, sch.report_freeness()) for rid, sch in self._replica_schedulers.items()]
 
+    def _all_normal_priority_freeness(self) -> List[Tuple[int, float]]:
+        """
+        Get freeness for normal-priority requests only (excludes high-priority headroom).
+        Per paper Section 4.4.3, Algorithm 1 line 17: autoscaling uses normal-priority freeness.
+        """
+        return [(rid, sch.report_normal_priority_freeness()) for rid, sch in self._replica_schedulers.items()]
+
+    def _all_running_request_counts(self) -> List[Tuple[int, int]]:
+        """
+        Get running request counts for each replica.
+        Per paper Section 4.4.3: scale-in selects "instance with fewest running requests".
+        """
+        return [(rid, len(sch._allocation_map)) for rid, sch in self._replica_schedulers.items()]
+
     def _freest_rid(self) -> Optional[int]:
         best = None
         best_F = -float("inf")
@@ -235,7 +249,11 @@ class LlumnixGlobalScheduler(BaseGlobalScheduler):
 
     # -------------------- Autoscaling signal --------------------
     def autoscale_recommendation(self) -> Optional[str]:
-        Fs = [F for _, F in self._all_freeness()]
+        """
+        Paper-compliant autoscaling: uses normal-priority freeness only.
+        Per Section 4.4.3, Algorithm 1 line 17: "average freeness for the normal priority".
+        """
+        Fs = [F for _, F in self._all_normal_priority_freeness()]
         if not Fs:
             return None
         avgF = sum(Fs) / len(Fs)

@@ -349,6 +349,25 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
         B = max(1, self._batch_normalizer_B)
         return (M - SigmaV) / B  # negative allowed
 
+    def report_normal_priority_freeness(self) -> float:
+        """
+        Calculate freeness considering only normal-priority requests.
+        Per paper Section 4.4.3: autoscaling uses "average freeness for the normal priority".
+        
+        This excludes priority headroom from high-priority requests to avoid
+        over-provisioning the cluster due to virtual usage inflation.
+        """
+        M = max(1, self._config.num_blocks)
+        # Sum virtual usage WITHOUT priority headroom
+        SigmaV = (
+            self._virtual_usage_physical()
+            + self._virtual_usage_hol_demand()
+            + self._virtual_usage_drain()
+            # Intentionally omit _virtual_usage_priority_headroom()
+        )
+        B = max(1, self._batch_normalizer_B)
+        return (M - SigmaV) / B
+
     def has_capacity(self, num_blocks: int = 1) -> bool:
         return self.can_allocate(num_blocks)
 

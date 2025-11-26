@@ -24,6 +24,7 @@ class AutoScaleEvent(BaseEvent):
         super().__init__(time, EventType.AUTOSCALE)
         self._interval = interval
         self._is_scaling_in = False
+        self._is_scaling_out = False
         self._draining_replicas = []
     
     def handle_event(
@@ -40,27 +41,37 @@ class AutoScaleEvent(BaseEvent):
         recommendation = scheduler.autoscale_recommendation()
         
         if recommendation == "scale_in":
-            # Find least loaded replica to drain
-            freeness_list = scheduler._all_freeness()
-            if freeness_list:
-                # Sort by freeness (ascending) and drain the one with highest freeness
-                # (least loaded = safest to drain)
-                freeness_list.sort(key=lambda x: x[1])
-                highest_freeness_rid, highest_freeness = freeness_list[-1]
+            # Paper-compliant scale-in: select instance with fewest running requests
+            # Per Section 4.4.3: "Llumnix chooses the instance with fewest running requests for termination"
+            running_counts = scheduler._all_running_request_counts()
+            if running_counts:
+                # Sort by running request count (ascending) and drain the one with fewest
+                running_counts.sort(key=lambda x: x[1])
+                fewest_requests_rid, request_count = running_counts[0]
                 
                 # Only trigger draining if there's capacity elsewhere
-                if len(freeness_list) > 1:
-                    scheduler.set_draining([highest_freeness_rid], draining=True)
-                    self._draining_replicas = [highest_freeness_rid]
+                if len(running_counts) > 1:
+                    scheduler.set_draining([fewest_requests_rid], draining=True)
+                    self._draining_replicas = [fewest_requests_rid]
+                    self._is_scaling_in = True
+                    # Get normal-priority freeness for logging (paper-compliant metric)
+                    normal_freeness = scheduler._all_normal_priority_freeness()
+                    avg_freeness = sum(f for _, f in normal_freeness) / len(normal_freeness)
                     logger.info(
-                        f"[AutoScale] Scale-in triggered: Replica {highest_freeness_rid} "
-                        f"marked for draining (avgF={sum(f for _, f in freeness_list) / len(freeness_list):.3f}, "
-                        f"high={scheduler._autoscale_high})"
+                        f"[AutoScale] Scale-in triggered: Replica {fewest_requests_rid} "
+                        f"marked for draining ({request_count} running requests, "
+                        f"avgF_normal={avg_freeness:.3f}, high={scheduler._autoscale_high})"
                     )
         
         elif recommendation == "scale_out":
+            # Mark for trace emission
+            self._is_scaling_out = True
+            # Use normal-priority freeness for logging (paper-compliant metric)
+            normal_freeness = scheduler._all_normal_priority_freeness()
+            avg_freeness = sum(f for _, f in normal_freeness) / len(normal_freeness)
             logger.warning(
-                f"[AutoScale] Scale-out recommended but not yet implemented. "
+                f"[AutoScale] Scale-out recommended at avgF_normal={avg_freeness:.3f} "
+                f"(low={scheduler._autoscale_low}) but not yet implemented. "
                 f"Cluster would need more replicas."
             )
         
@@ -79,18 +90,36 @@ class AutoScaleEvent(BaseEvent):
         """
         Emit autoscale events to Chrome trace for visibility.
         """
-        if not self._is_scaling_in:
-            return []
+        events = []
         
-        return [{
-            "name": f"AutoScale (Drain Replica {self._draining_replicas[0]})",
-            "cat": "autoscale",
-            "ph": "i",  # Instant event
-            "ts": self.time * 1e6,
-            "pid": -1,  # Global scope
-            "tid": 0,
-            "s": "g",
-            "args": {
-                "draining_replicas": self._draining_replicas,
-            }
-        }]
+        if self._is_scaling_in:
+            events.append({
+                "name": f"AutoScale: Scale-In (Drain Replica {self._draining_replicas[0]})",
+                "cat": "autoscale",
+                "ph": "i",  # Instant event
+                "ts": self.time * 1e6,
+                "pid": -1,  # Global scope
+                "tid": 0,
+                "s": "g",
+                "args": {
+                    "action": "scale_in",
+                    "draining_replicas": self._draining_replicas,
+                }
+            })
+        
+        if self._is_scaling_out:
+            events.append({
+                "name": "AutoScale: Scale-Out Needed (not implemented)",
+                "cat": "autoscale",
+                "ph": "i",  # Instant event
+                "ts": self.time * 1e6,
+                "pid": -1,  # Global scope
+                "tid": 0,
+                "s": "g",
+                "args": {
+                    "action": "scale_out",
+                    "note": "Scale-out not yet implemented"
+                }
+            })
+        
+        return events
