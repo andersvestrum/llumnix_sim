@@ -93,18 +93,43 @@ class BatchStageEndEvent(BaseEvent):
             if len(unique_priorities) == 1:
                 batch_priority = request_priorities[0]
 
-        # -------------------------------
-        # ★ Add temperature color support
-        # -------------------------------
-        # We need access to the scheduler, so retrieve via global scheduler lookup
+        # Scheduler metadata (Llumnix + Llumlet behavior visualization)
+        scheduler_info = {}
+        temperature = None
+        freeness = None
+        virtual_usage = None
+        is_draining = False
+        
         try:
             # GlobalScheduler must expose get_replica_scheduler(replica_id)
             replica_sched = BaseEvent.global_scheduler_ref.get_replica_scheduler(
                 self._replica_id
             )
             color = replica_sched._temperature_color()
-        except Exception:
+            
+            # Capture Llumlet-specific metrics for Chrome trace
+            temperature = replica_sched._compute_temperature()
+            freeness = replica_sched.report_freeness()
+            virtual_usage = replica_sched._sum_virtual_usage()
+            is_draining = getattr(replica_sched, "_is_draining", False)
+            
+            # Break down virtual usage components for visibility
+            scheduler_info = {
+                "temperature": round(temperature, 3),
+                "freeness": round(freeness, 3),
+                "virtual_usage": virtual_usage,
+                "physical_usage": replica_sched._virtual_usage_physical(),
+                "hol_demand": replica_sched._virtual_usage_hol_demand(),
+                "priority_headroom": replica_sched._virtual_usage_priority_headroom(),
+                "drain_usage": replica_sched._virtual_usage_drain(),
+                "is_draining": is_draining,
+                "num_blocks": replica_sched._config.num_blocks,
+            }
+        except Exception as e:
             color = "grey"
+            logger.warning(f"Could not extract scheduler info for chrome trace: {e}")
+            import traceback
+            logger.warning(traceback.format_exc())
 
         return [{
             "name": (
@@ -116,7 +141,7 @@ class BatchStageEndEvent(BaseEvent):
             "dur": self._batch_stage.execution_time * 1e6,
             "pid": self._replica_id,
             "tid": self._stage_id,
-            "cname": color,          # ★ Insert color field here
+            "cname": color,
             "args": {
                 "batch_id": self._batch.id,
                 "batch_stage_id": self._batch_stage.id,
@@ -129,5 +154,6 @@ class BatchStageEndEvent(BaseEvent):
                 "batch_priority": batch_priority,
                 "request_priorities": request_priorities,
                 "request_ids": request_ids,
+                **scheduler_info,  # Include Llumnix scheduler state
             },
         }]

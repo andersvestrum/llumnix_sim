@@ -13,3 +13,4 @@ class EventType(BaseIntEnum):
     REPLICA_STAGE_SCHEDULE = 7
     MIGRATION = 8  # Llumnix request migration
     REBALANCE = 9  # Llumnix periodic rebalancing
+    AUTOSCALE = 10  # Auto-scaling (scale-in/out) decisions

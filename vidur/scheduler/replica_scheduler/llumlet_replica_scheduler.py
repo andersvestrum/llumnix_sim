@@ -349,6 +349,25 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
         B = max(1, self._batch_normalizer_B)
         return (M - SigmaV) / B  # negative allowed
 
+    def report_normal_priority_freeness(self) -> float:
+        """
+        Calculate freeness considering only normal-priority requests.
+        Per paper Section 4.4.3: autoscaling uses "average freeness for the normal priority".
+        
+        This excludes priority headroom from high-priority requests to avoid
+        over-provisioning the cluster due to virtual usage inflation.
+        """
+        M = max(1, self._config.num_blocks)
+        # Sum virtual usage WITHOUT priority headroom
+        SigmaV = (
+            self._virtual_usage_physical()
+            + self._virtual_usage_hol_demand()
+            + self._virtual_usage_drain()
+            # Intentionally omit _virtual_usage_priority_headroom()
+        )
+        B = max(1, self._batch_normalizer_B)
+        return (M - SigmaV) / B
+
     def has_capacity(self, num_blocks: int = 1) -> bool:
         return self.can_allocate(num_blocks)
 
@@ -380,25 +399,41 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
 
     def decide_migration_candidate(self, target_capacity_blocks: int) -> Optional[int]:
         """
-        Pick a running or queued request to move, preferring (low priority, small KV).
+        Llumnix migration candidate selection (Algorithm 1 logic):
+        Prefer low priority (higher priority value) and shorter sequence lengths.
+        
+        When draining (auto-scaling): Prioritize RUNNING requests over queued ones
+        to migrate actual KV state. This matches the paper's intent to drain replicas
+        by migrating "remaining requests" with their allocations.
         """
-        candidates: List[Tuple[int, int, int]] = []  # (priority, blocks, req_id)
+        running_candidates: List[Tuple[int, int, int]] = []  # (priority, blocks, req_id)
+        queued_candidates: List[Tuple[int, int, int]] = []
 
-        # Running
+        # Running requests — these have actual KV blocks allocated
         for req_id, blocks in self._allocation_map.items():
             if blocks <= target_capacity_blocks:
-                pr = getattr(self._request_index.get(req_id), "priority", 0)
-                candidates.append((pr, blocks, req_id))
+                req = self._request_index.get(req_id)
+                pr = getattr(req, "priority", 0)
+                running_candidates.append((pr, blocks, req_id))
 
-        # Queued — approximate blocks using next-step demand
+        # Queued requests — approximate blocks using next-step demand
         for pr, _, req in self._priority_queue:
             b = self._blocks_for_request_next_step(req)
             if b <= target_capacity_blocks:
-                candidates.append((pr, b, req.id))
+                queued_candidates.append((pr, b, req.id))
+
+        # When draining, prioritize running requests (they have actual state to migrate)
+        # Otherwise, use normal load-balancing (which may include queued for fairness)
+        if self._is_draining and running_candidates:
+            candidates = running_candidates
+        else:
+            candidates = running_candidates + queued_candidates
 
         if not candidates:
             return None
-        # lowest priority (largest pr) first, then smallest KV
+        
+        # Llumnix preference: lower priorities (higher priority value) first, then smallest KV
+        # This matches the paper's goal of migrating low-priority, short-sequence requests
         candidates.sort(key=lambda t: (-t[0], t[1]))
         return candidates[0][2]
 
@@ -409,6 +444,10 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
         1) Choose candidate (low-pri, small KV).
         2) If queued: cold-migrate immediately (no staging).
         3) If running: set up multi-stage migration state; each batch advances one stage.
+        
+        CRITICAL: When source replica is draining (auto-scaling), prioritize migrating
+        ALL requests, not just load-balancing. The global scheduler will have marked
+        the source as draining via set_draining(True), triggering this aggressive behavior.
         """
 
         # PRE-FLIGHT VALIDATION
@@ -428,6 +467,7 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
             return None
 
         # Pick migration candidate
+        # When draining, prioritize migrating ALL requests; otherwise use smart selection
         cand_id = self.decide_migration_candidate(dest_free)
         if cand_id is None:
             return None
@@ -472,9 +512,10 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
             # Push into destination queue
             dest_scheduler.enqueue_request(req)
 
-            logger.info(
+            log_level = "info" if self._is_draining else "debug"
+            getattr(logger, log_level)(
                 f"[Migration] Queued req {cand_id} cold-migrated from replica {self.replica_id} "
-                f"-> {dest_scheduler.replica_id} (blocks={blocks})"
+                f"-> {dest_scheduler.replica_id} (blocks={blocks}){' [DRAINING]' if self._is_draining else ''}"
             )
 
             return (cand_id, self.replica_id, dest_scheduler.replica_id)
@@ -502,10 +543,11 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
             "stages_done": 0,
         }
 
-        logger.info(
+        log_level = "info" if self._is_draining else "debug"
+        getattr(logger, log_level)(
             f"[Migration] Running req {cand_id} scheduled for multi-stage migration "
             f"{self.replica_id} -> {dest_scheduler.replica_id} "
-            f"(blocks={blocks}, stages={stages_total})"
+            f"(blocks={blocks}, stages={stages_total}){' [DRAINING]' if self._is_draining else ''}"
         )
 
         return (cand_id, self.replica_id, dest_scheduler.replica_id)
@@ -526,33 +568,63 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
             and len(self._migrations_out) == 0
         )
 
-    def _compute_temperature(self) -> float:
+    def report_freeness(self) -> float:
         """
-        Returns a 0..1 temperature based on virtual usage divided by capacity.
+        Llumnix freeness metric: F = (M - ΣV) / B
+        where M = total memory blocks, ΣV = sum of virtual usages, B = batch size.
+        Represents how many more decode iterations the batch can run for.
         """
         M = max(1, self._config.num_blocks)
-        usage = min(self._sum_virtual_usage(), M)
-        return usage / M
+        sigma_v = self._sum_virtual_usage()
+        B = max(1, self._batch_normalizer_B)
+        return (M - sigma_v) / B
+
+    def _compute_temperature(self) -> float:
+        """
+        Returns virtual usage as a temperature (can exceed 1.0 when overloaded).
+        
+        INTENT: Show the actual freeness level that drives migration and auto-scaling.
+        When virtual usage is high (red), migrations and draining are triggered.
+        When virtual usage is low (green), system is balanced and ready for consolidation.
+        
+        This reveals the true system state metric that drives all scheduling decisions.
+        """
+        M = max(1, self._config.num_blocks)
+        virtual_usage = self._sum_virtual_usage()
+        
+        # Raw metric: virtual usage as multiple of capacity
+        # Can exceed 1.0 to show overload intensity
+        temperature = virtual_usage / M
+        
+        return temperature
 
     def _temperature_color(self) -> str:
         """
-        Chrome trace color bucket based on temperature.
+        Chrome trace color bucket based on temperature (freeness metric).
         Maps temperature → Chrome trace *reserved* color name.
+        
+        THRESHOLDS (original, showing freeness transitions):
+        - 0.10 (10%): transition from good → rail_idle
+        - 0.25 (25%): transition from rail_idle → rail_animation
+        - 0.50 (50%): transition from rail_animation → terrible
+        - 0.75 (75%): transition from terrible → bad
+        
+        These thresholds show when migration/draining would be triggered.
         """
         t = self._compute_temperature()
 
         # Must use only allowed Chrome names
         # (see color_scheme for trace viewer)
-        if t < 0.25:
-            return "good"              # green
+        if t < 0.10:
+            return "good"              # green (idle/light)
+        elif t < 0.25:
+            return "rail_idle"         # light green (light load)
         elif t < 0.50:
-            return "rail_idle"         # light green
+            return "rail_animation"    # yellow (moderate load)
         elif t < 0.75:
-            return "rail_animation"    # yellow
-        elif t < 0.90:
-            return "terrible"          # orange
+            return "terrible"          # orange (high load)
         else:
-            return "bad"               # red
+            return "bad"               # red (very high load)
 
     def _emit_chrome_trace_batch(self, batch: Batch, start_time: float, end_time: float) -> None:
         """
