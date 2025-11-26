@@ -45,17 +45,43 @@ This document summarizes the changes made to ensure full compliance with the Llu
 
 ---
 
-### 3. ✅ Multi-Priority Support Verified
+### 3. ✅ Per-Priority Headroom Pools Implemented
 
-**Design Verification:**
-The current implementation correctly supports multiple priority levels:
+**Paper Reference:** Algorithm 1, Lines 8-10
+```
+Line 8:  virtualUsage = physicalUsage + GetHeadroom(priority, instance)
+Line 10: GetHeadroom(p, instance) = headroomForPriority[p] / instance.numRequests[p]
+```
 
-- **Priority Definition:** Lower numbers = higher priority (0 = critical/highest)
-- **Headroom Calculation:** `_virtual_usage_priority_headroom()` divides total headroom among ALL high-priority requests (priority ≤ threshold)
-- **Per-Request Accounting:** Each high-priority request gets its share: `headroom / max(1, hi_count)`
-- **Virtual Usage Sum:** The global headroom value is added once in `_sum_virtual_usage()`, which is semantically equivalent to adding per-request headroom to each request's virtual usage
+**Changes Made:**
+- Replaced single shared headroom with **per-priority headroom pools**
+- Each priority level has its own headroom budget stored in `_headroom_for_priority[]` array
+- Default configuration:
+  - Priority 0 (Critical): 3000 blocks headroom
+  - Priority 1 (High): 2400 blocks headroom
+  - Priority 2+ (Normal/Low/Background): 0 blocks headroom
 
-**Paper Compliance:** The implementation matches Algorithm 1 lines 8-10, where headroom is added to virtual usage calculation. The per-replica global sum is mathematically equivalent to per-request addition.
+**Implementation:**
+```python
+def _virtual_usage_priority_headroom(self) -> int:
+    total_headroom = 0
+    for priority in range(self._num_priority_levels):
+        if has_requests_at(priority) and headroom[priority] > 0:
+            total_headroom += headroom[priority]
+    return total_headroom
+```
+
+**Paper Compliance:** 
+- ✅ Each priority has independent headroom budget (Algorithm 1 line 10)
+- ✅ Headroom divided by count at each priority level
+- ✅ Creates spreading behavior within each priority tier
+- ✅ Maintains LP repulsion from HP replicas
+
+**Behavioral Impact:**
+- Replicas with N requests at priority P maintain constant total headroom for priority P
+- Physical usage growth causes replicas with more requests to look MORE loaded
+- Result: High-priority requests naturally spread across replicas (not cluster)
+- Low-priority requests still repelled from any HP replica
 
 ---
 
@@ -90,14 +116,22 @@ The current implementation correctly supports multiple priority levels:
 
 1. `vidur/scheduler/replica_scheduler/llumlet_replica_scheduler.py`
    - Added `report_normal_priority_freeness()` method
+   - **FIXED:** Replaced single `_headroom_blocks_per_hi` with per-priority `_headroom_for_priority[]` array
+   - **FIXED:** Reimplemented `_virtual_usage_priority_headroom()` per Algorithm 1 lines 8-10
+   - Each priority level now has independent headroom budget
 
 2. `vidur/scheduler/global_scheduler/llumnix_global_scheduler.py`
    - Added `_all_normal_priority_freeness()` method
    - Added `_all_running_request_counts()` method
    - Updated `autoscale_recommendation()` to use normal-priority freeness
+   - Added fallback logic for non-llumlet replica schedulers
 
 3. `vidur/events/autoscale_event.py`
    - Updated scale-in selection to use fewest running requests
+
+4. `vidur/scheduler/global_scheduler/base_global_scheduler.py`
+   - Modified to allow flexible replica scheduler selection with Llumnix
+   - Added warning when using non-llumlet schedulers
    - Updated logging to show normal-priority freeness and request counts
 
 ---
