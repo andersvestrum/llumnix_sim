@@ -144,8 +144,13 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
         chosen_requests: List[Request] = []
         total_blocks = 0
         remaining_queue = list(self._priority_queue)  # snapshot
+        batch_size_cap = getattr(self._config, "batch_size_cap", float('inf'))
 
         for pr, seq, req in remaining_queue:
+            # Enforce batch size cap
+            if len(chosen_requests) >= batch_size_cap:
+                break
+                
             blocks = self._blocks_for_request_next_step(req)
 
             # If adding this request exceeds KV capacity → stop packing
@@ -259,8 +264,7 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
                         if r.id != req_id
                     ]
 
-                    # Add to destination
-                    dest_sched._request_index[req_id] = req
+                    # Add to destination (enqueue_request adds to _request_index internally)
                     dest_sched.enqueue_request(req)
 
                     logger.info(
@@ -469,7 +473,8 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
                 )
                 return None
 
-            # Push into destination queue
+            # Remove from source tracking and push into destination queue
+            self._request_index.pop(cand_id, None)
             dest_scheduler.enqueue_request(req)
 
             logger.info(
