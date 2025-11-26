@@ -67,29 +67,68 @@ class LlumnixGlobalScheduler(BaseGlobalScheduler):
 
         self._migration_count = 0
 
-    # -------------------- Helpers (only llumlet API) --------------------
+    # -------------------- Helpers (with fallback for non-llumlet schedulers) --------------------
     def _all_freeness(self) -> List[Tuple[int, float]]:
-        return [(rid, sch.report_freeness()) for rid, sch in self._replica_schedulers.items()]
+        """Get freeness from all replicas. Falls back to simple metric for non-llumlet schedulers."""
+        result = []
+        for rid, sch in self._replica_schedulers.items():
+            if hasattr(sch, 'report_freeness'):
+                result.append((rid, sch.report_freeness()))
+            else:
+                # Fallback: estimate freeness from free blocks / batch size
+                free_blocks = getattr(sch, '_num_free_blocks', 0)
+                batch_size = getattr(sch, '_batch_size', 1)
+                result.append((rid, float(free_blocks) / max(1, batch_size)))
+        return result
 
     def _all_normal_priority_freeness(self) -> List[Tuple[int, float]]:
         """
         Get freeness for normal-priority requests only (excludes high-priority headroom).
         Per paper Section 4.4.3, Algorithm 1 line 17: autoscaling uses normal-priority freeness.
+        Falls back to regular freeness if not supported.
         """
-        return [(rid, sch.report_normal_priority_freeness()) for rid, sch in self._replica_schedulers.items()]
+        result = []
+        for rid, sch in self._replica_schedulers.items():
+            if hasattr(sch, 'report_normal_priority_freeness'):
+                result.append((rid, sch.report_normal_priority_freeness()))
+            elif hasattr(sch, 'report_freeness'):
+                # Fallback: use regular freeness (no priority distinction)
+                result.append((rid, sch.report_freeness()))
+            else:
+                # Fallback: estimate from free blocks
+                free_blocks = getattr(sch, '_num_free_blocks', 0)
+                batch_size = getattr(sch, '_batch_size', 1)
+                result.append((rid, float(free_blocks) / max(1, batch_size)))
+        return result
 
     def _all_running_request_counts(self) -> List[Tuple[int, int]]:
         """
         Get running request counts for each replica.
         Per paper Section 4.4.3: scale-in selects "instance with fewest running requests".
         """
-        return [(rid, len(sch._allocation_map)) for rid, sch in self._replica_schedulers.items()]
+        result = []
+        for rid, sch in self._replica_schedulers.items():
+            if hasattr(sch, '_allocation_map'):
+                result.append((rid, len(sch._allocation_map)))
+            elif hasattr(sch, '_running_requests'):
+                result.append((rid, len(sch._running_requests)))
+            else:
+                # Fallback: assume 0 running requests
+                result.append((rid, 0))
+        return result
 
     def _freest_rid(self) -> Optional[int]:
         best = None
         best_F = -float("inf")
         for rid, sch in self._replica_schedulers.items():
-            F = sch.report_freeness()
+            if hasattr(sch, 'report_freeness'):
+                F = sch.report_freeness()
+            else:
+                # Fallback: estimate freeness
+                free_blocks = getattr(sch, '_num_free_blocks', 0)
+                batch_size = getattr(sch, '_batch_size', 1)
+                F = float(free_blocks) / max(1, batch_size)
+            
             if F > best_F:
                 best_F, best = F, rid
         return best
@@ -126,18 +165,29 @@ class LlumnixGlobalScheduler(BaseGlobalScheduler):
             for req in by_pr[pr]:
 
                 # 1. Select target replica among *non-draining* ones
-                candidates = [
-                    (rid, sch.report_freeness())
-                    for rid, sch in self._replica_schedulers.items()
-                    if not sch._is_draining
-                ]
+                candidates = []
+                for rid, sch in self._replica_schedulers.items():
+                    is_draining = getattr(sch, '_is_draining', False)
+                    if not is_draining:
+                        if hasattr(sch, 'report_freeness'):
+                            F = sch.report_freeness()
+                        else:
+                            # Fallback: estimate freeness
+                            free_blocks = getattr(sch, '_num_free_blocks', 0)
+                            batch_size = getattr(sch, '_batch_size', 1)
+                            F = float(free_blocks) / max(1, batch_size)
+                        candidates.append((rid, F))
 
                 if not candidates:
                     # Fallback: all replicas are draining → place on best available
-                    candidates = [
-                        (rid, sch.report_freeness())
-                        for rid, sch in self._replica_schedulers.items()
-                    ]
+                    for rid, sch in self._replica_schedulers.items():
+                        if hasattr(sch, 'report_freeness'):
+                            F = sch.report_freeness()
+                        else:
+                            free_blocks = getattr(sch, '_num_free_blocks', 0)
+                            batch_size = getattr(sch, '_batch_size', 1)
+                            F = float(free_blocks) / max(1, batch_size)
+                        candidates.append((rid, F))
 
                 # Pick replica with max F
                 rid = max(candidates, key=lambda x: x[1])[0]
@@ -215,12 +265,17 @@ class LlumnixGlobalScheduler(BaseGlobalScheduler):
             dst = self._replica_schedulers[dst_rid]
 
             # redundant safety check
-            if dst._is_draining:
+            if getattr(dst, '_is_draining', False):
+                continue
+
+            # Check if replica schedulers support migration
+            if not hasattr(src, 'begin_migration_to') or not hasattr(dst, 'begin_migration_to'):
+                # Migration not supported by this replica scheduler type
                 continue
 
             # CRITICAL: When source is DRAINING, migrate ALL requests, not just one
             # Keep calling begin_migration_to() until source is empty or destination full
-            is_draining = src._is_draining
+            is_draining = getattr(src, '_is_draining', False)
             mig_count = 0
             while True:
                 mig = src.begin_migration_to(dst)
@@ -267,7 +322,7 @@ class LlumnixGlobalScheduler(BaseGlobalScheduler):
     def set_draining(self, replica_ids: List[int], draining: bool = True) -> None:
         for rid in replica_ids:
             sch = self._replica_schedulers.get(rid)
-            if sch:
+            if sch and hasattr(sch, 'set_draining'):
                 sch.set_draining(draining)
 
     # -------------------- Optional stats --------------------

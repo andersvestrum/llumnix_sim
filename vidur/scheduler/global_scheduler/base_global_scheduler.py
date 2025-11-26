@@ -33,14 +33,23 @@ class BaseGlobalScheduler(ABC):
         # Determine which replica scheduler type to use
         # --------------------------------------------------------
         global_type = str(config.cluster_config.global_scheduler_config.get_type()).lower()
+        configured_replica_type = config.cluster_config.replica_scheduler_config.get_type()
 
         if global_type == "llumnix":
-            # Force use of LlumletLocalScheduler regardless of replica config type
-            replica_sched_type = "llumlet"
-            logger.info("Global scheduler is Llumnix → using LlumletLocalScheduler per replica.")
+            # Check if user explicitly configured a non-llumlet replica scheduler
+            if configured_replica_type != "llumlet":
+                logger.warning(
+                    f"Llumnix global scheduler requested with '{configured_replica_type}' replica scheduler. "
+                    f"Note: Llumnix features (migration, priority headroom, virtual usage) require 'llumlet'. "
+                    f"Using '{configured_replica_type}' - some Llumnix features may be unavailable."
+                )
+                replica_sched_type = configured_replica_type
+            else:
+                logger.info("Global scheduler is Llumnix → using LlumletLocalScheduler per replica (paper-compliant).")
+                replica_sched_type = "llumlet"
         else:
             # Use the normal one from config
-            replica_sched_type = config.cluster_config.replica_scheduler_config.get_type()
+            replica_sched_type = configured_replica_type
             logger.info(f"Using replica scheduler type: {replica_sched_type}")
 
         # --------------------------------------------------------
