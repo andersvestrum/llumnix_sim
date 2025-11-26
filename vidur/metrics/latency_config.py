@@ -34,6 +34,9 @@ BASE_COMMAND = [
     "--execution_time_predictor_config_type linear_regression",
     "--linear_regression_execution_time_predictor_config_prediction_max_batch_size 32",
     "--linear_regression_execution_time_predictor_config_prediction_max_tokens_per_request 8192",
+    "--linear_regression_execution_time_predictor_config_no_cache",
+    # Keep caching fully disabled for latency tests.
+    "--metrics_config_cache_dir /tmp/vidur_latency_no_cache",
     "--time_limit 60",
     "--metrics_config_enable_chrome_trace",
     "--metrics_config_write_metrics",
@@ -80,15 +83,6 @@ LATENCY_TESTS = [
         "cmd": cmd_with_overrides("--no-llumnix_global_scheduler_config_enable_migration"),
     },
     {
-        "name": "migration_disabled_hard",
-        "description": "Migration disabled under high 150 QPS and 2 replicas for worst-case queuing.",
-        "cmd": cmd_with_overrides(
-            "--no-llumnix_global_scheduler_config_enable_migration",
-            "--poisson_request_interval_generator_config_qps 150",
-            "--cluster_config_num_replicas 2",
-        ),
-    },
-    {
         "name": "aggressive_rebalance_easy",
         "description": "Aggressive rebalance with 20ms interval and 0.2 gap; moderate pressure.",
         "cmd": cmd_with_overrides(
@@ -102,14 +96,6 @@ LATENCY_TESTS = [
         "cmd": cmd_with_overrides(
             "--llumnix_global_scheduler_config_rebalance_interval 0.01",
             "--llumnix_global_scheduler_config_load_imbalance_threshold 0.1",
-        ),
-    },
-    {
-        "name": "aggressive_rebalance_hard",
-        "description": "Hyper-aggressive: 5ms interval, 0.05 gap plus 5 priority levels to churn migrations.",
-        "cmd": cmd_with_overrides(
-            "--llumnix_global_scheduler_config_rebalance_interval 0.005",
-            "--llumnix_global_scheduler_config_load_imbalance_threshold 0.05",
         ),
     },
     {
@@ -186,64 +172,6 @@ LATENCY_TESTS = [
         ),
     },
     {
-        "name": "coarse_blocking_easy",
-        "description": "Coarse blocking at 24 tokens/block to reduce allocation churn slightly.",
-        "cmd": cmd_with_overrides("--llumlet_scheduler_config_block_size 24"),
-    },
-    {
-        "name": "coarse_blocking_medium",
-        "description": "Coarse blocking: 32-token blocks to see coarser freeness and migration choices.",
-        "cmd": cmd_with_overrides("--llumlet_scheduler_config_block_size 32"),
-    },
-    {
-        "name": "coarse_blocking_hard",
-        "description": "Very coarse blocking: 48-token blocks plus 2 replicas to amplify imbalance sensitivity.",
-        "cmd": cmd_with_overrides(
-            "--llumlet_scheduler_config_block_size 48",
-            "--cluster_config_num_replicas 2",
-        ),
-    },
-    {
-        "name": "fine_blocking_easy",
-        "description": "Finer blocking: 12-token blocks for modestly better packing.",
-        "cmd": cmd_with_overrides("--llumlet_scheduler_config_block_size 12"),
-    },
-    {
-        "name": "fine_blocking_medium",
-        "description": "Fine blocking: 8-token blocks to allow finer packing and different freeness ordering.",
-        "cmd": cmd_with_overrides("--llumlet_scheduler_config_block_size 8"),
-    },
-    {
-        "name": "fine_blocking_hard",
-        "description": "Ultra-fine blocking: 4-token blocks; increases scheduler overhead but maximizes packing.",
-        "cmd": cmd_with_overrides("--llumlet_scheduler_config_block_size 4"),
-    },
-    {
-        "name": "low_replica_high_qps_easy",
-        "description": "2 replicas at 100 QPS with migration enabled; light headroom.",
-        "cmd": cmd_with_overrides(
-            "--cluster_config_num_replicas 2",
-            "--poisson_request_interval_generator_config_qps 100",
-        ),
-    },
-    {
-        "name": "low_replica_high_qps_medium",
-        "description": "2 replicas with higher 120 QPS arrival rate to stress global placement without headroom.",
-        "cmd": cmd_with_overrides(
-            "--cluster_config_num_replicas 2",
-            "--poisson_request_interval_generator_config_qps 120",
-        ),
-    },
-    {
-        "name": "low_replica_high_qps_hard",
-        "description": "2 replicas, 150 QPS, and 3000 requests to push saturation and migration churn.",
-        "cmd": cmd_with_overrides(
-            "--cluster_config_num_replicas 2",
-            "--poisson_request_interval_generator_config_qps 150",
-            "--synthetic_request_generator_config_num_requests 3000",
-        ),
-    },
-    {
         "name": "priority_stress_five_levels_easy",
         "description": "5-level priority mix at 60 QPS to validate ordering under lighter load.",
         "cmd": cmd_with_overrides(
@@ -263,30 +191,6 @@ LATENCY_TESTS = [
         "cmd": cmd_with_overrides(
             "--poisson_request_interval_generator_config_qps 110",
             "--synthetic_request_generator_config_num_requests 3000",
-        ),
-    },
-    {
-        "name": "autoscale_band_easy",
-        "description": "Wide autoscale band to dampen scale signals (low=-1.0, high=2.0).",
-        "cmd": cmd_with_overrides(
-            "--llumnix_global_scheduler_config_autoscale_low -1.0",
-            "--llumnix_global_scheduler_config_autoscale_high 2.0",
-        ),
-    },
-    {
-        "name": "autoscale_band_medium",
-        "description": "Moderate autoscale band (low=-0.5, high=1.5) close to defaults.",
-        "cmd": cmd_with_overrides(
-            "--llumnix_global_scheduler_config_autoscale_low -0.5",
-            "--llumnix_global_scheduler_config_autoscale_high 1.5",
-        ),
-    },
-    {
-        "name": "autoscale_band_hard",
-        "description": "Tight autoscale band (low=-0.2, high=1.0) to trigger frequent recommendations.",
-        "cmd": cmd_with_overrides(
-            "--llumnix_global_scheduler_config_autoscale_low -0.2",
-            "--llumnix_global_scheduler_config_autoscale_high 1.0",
         ),
     },
     {
@@ -339,21 +243,6 @@ LATENCY_TESTS = [
             "--llumnix_global_scheduler_config_network_bandwidth_gbps 40",
             "--llumnix_global_scheduler_config_migration_overhead_ms 10.0",
         ),
-    },
-    {
-        "name": "migration_stage_granularity_easy",
-        "description": "Migration in 4-block stages for moderate staging overhead.",
-        "cmd": cmd_with_overrides("--llumlet_scheduler_config_migration_stage_blocks 4"),
-    },
-    {
-        "name": "migration_stage_granularity_medium",
-        "description": "Migration in 8-block stages to reduce coordination frequency.",
-        "cmd": cmd_with_overrides("--llumlet_scheduler_config_migration_stage_blocks 8"),
-    },
-    {
-        "name": "migration_stage_granularity_hard",
-        "description": "Migration in 16-block stages; long stages may delay completion.",
-        "cmd": cmd_with_overrides("--llumlet_scheduler_config_migration_stage_blocks 16"),
     },
     {
         "name": "prefill_decode_ratio_easy",

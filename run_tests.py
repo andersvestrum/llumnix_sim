@@ -24,6 +24,14 @@ import wandb
 from vidur.metrics.latency_config import LATENCY_TESTS
 from vidur.metrics import latency_analysis as la
 
+import sys
+
+# Support Slurm job-array mode: run a single test if --index is provided.
+if "--index" in sys.argv:
+    idx = int(sys.argv[sys.argv.index("--index") + 1])
+    from vidur.metrics.latency_config import LATENCY_TESTS as _ALL_TESTS
+    LATENCY_TESTS = [_ALL_TESTS[idx]]
+
 
 def _run_command(cmd: str) -> None:
     print(f"[info] Running: {cmd}")
