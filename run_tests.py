@@ -9,6 +9,17 @@ For each scenario in vidur.metrics.latency_config.LATENCY_TESTS:
 Environment:
   - Set WANDB_PROJECT / WANDB_ENTITY / WANDB_MODE as needed for logging.
   - Metrics tracing must be enabled (already set in the base command).
+
+Look at the PRIORITY_DISTRIBUTION.md file and make plots (you need to change the variable 
+--synthetic_request_generator_config_priority_distribution_type in the config 
+files used in the different tests (latency_config.py)) to compare the performance over different priority distributions.
+In addition, we can now change the amount of priority levels used in the tests (for example from 2 to 5).
+This can be changed in the config files used in the different tests by changing the variable
+--synthetic_request_generator_config_num_priority_levels. Please keep the same structure in the config files
+(latency_config.py) as before, where we have several tests with a specific name, hardness, etc etc. Keep having descriptions
+for each test that explain what is being tested.
+
+Also make the plot compare the different TTFT and TBT of the different priority levels for each distribution.
 """
 
 from __future__ import annotations
