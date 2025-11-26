@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 
-def run_simulation_for_scheduler(scheduler: str, out_dir: Path, args):
+def run_simulation_for_scheduler(scheduler: str, num_replicas: int, out_dir: Path, args):
     out_dir.mkdir(parents=True, exist_ok=True)
 
     cmd = [
@@ -34,7 +34,7 @@ def run_simulation_for_scheduler(scheduler: str, out_dir: Path, args):
         "--replica_config_model_name",
         args.model,
         "--cluster_config_num_replicas",
-        str(args.replicas),
+        str(num_replicas),
         "--replica_config_tensor_parallel_size",
         str(args.tp),
         "--replica_config_num_pipeline_stages",
@@ -61,6 +61,7 @@ def run_simulation_for_scheduler(scheduler: str, out_dir: Path, args):
         "",
         "--metrics_config_wandb_group",
         "",
+        "--no-metrics_config_enable_chrome_trace",
     ]
 
     # scheduler-specific options
@@ -69,8 +70,14 @@ def run_simulation_for_scheduler(scheduler: str, out_dir: Path, args):
 
     # batch-cap flags for common schedulers
     if scheduler.lower() == "llumlet":
-        # llumlet uses max_tokens_in_batch instead of batch_size_cap
-        cmd += ["--llumlet_scheduler_config_max_tokens_in_batch", str(args.llumlet_max_tokens)]
+        # llumlet is a replica scheduler used with llumnix global scheduler
+        cmd += [
+            "--global_scheduler_config_type", "llumnix",
+            "--llumlet_scheduler_config_max_tokens_in_batch", str(args.llumlet_max_tokens),
+        ]
+        # Add llumnix global scheduler config if migration is enabled
+        if args.enable_migration:
+            cmd += ["--llumnix_global_scheduler_config_enable_migration"]
     else:
         cap_flag = f"--{scheduler}_scheduler_config_batch_size_cap"
         cmd += [cap_flag, str(args.batch_cap)]
@@ -79,7 +86,12 @@ def run_simulation_for_scheduler(scheduler: str, out_dir: Path, args):
     env["WANDB_MODE"] = "disabled"
 
     print("Running:", " ".join(cmd))
-    subprocess.run(cmd, check=True, env=env)
+    try:
+        subprocess.run(cmd, check=True, env=env)
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"Run failed for {scheduler}@{num_replicas}r: {e}")
+        return False
 
 
 def collect_metrics(out_dir: Path):
@@ -109,37 +121,79 @@ def plot_results(results: dict, out_file: Path):
         raise ValueError("No results provided to plot_results()")
 
     df = pd.DataFrame(results).T
-    # reorder columns for nicer layout
     missing = [c for c in ("p50", "p90", "p99") if c not in df.columns]
     if missing:
         raise KeyError(f"Missing percentile columns in results: {missing}")
 
     plot_df = df[["p50", "p90", "p99"]]
 
-    ax = plot_df.plot(kind="bar", figsize=(8, 5), colormap="plasma")
+    figsize = (max(10, len(plot_df) * 0.8), 6)
+    ax = plot_df.plot(kind="bar", figsize=figsize, colormap="plasma")
     ax.set_ylabel("Request E2E latency (s)")
     ax.set_title("Scheduler comparison — latency percentiles")
+    ax.set_xlabel("Configuration (scheduler @ replicas)")
     ax.grid(axis="y", linestyle="--", alpha=0.5)
-    
-    # Set y-axis to start from minimum value for better granularity
-    y_min = plot_df.min().min() * 0.95  # Start 5% below minimum
-    y_max = plot_df.max().max() * 1.05  # End 5% above maximum
+
+    y_min = plot_df.min().min() * 0.95
+    y_max = plot_df.max().max() * 1.05
     ax.set_ylim(y_min, y_max)
-    
+
+    plt.xticks(rotation=45, ha='right')
     plt.tight_layout()
     out_file.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(out_file)
+    plt.savefig(out_file, dpi=150)
     plt.close()
+
+
+def plot_results_by_replica(results: dict, base_dir: Path, ts: str):
+    if not results:
+        print("No results to plot.")
+        return
+
+    # Parse labels like "scheduler@Nr" to group by N
+    grouped: dict[int, dict] = {}
+    for label, metrics in results.items():
+        try:
+            # Expect label format: name@{N}r
+            parts = label.split('@')
+            if len(parts) != 2 or not parts[1].endswith('r'):
+                replica_count = None
+            else:
+                replica_count = int(parts[1][:-1])
+        except Exception:
+            replica_count = None
+
+        if replica_count is None:
+            # Put into a special group
+            replica_count = -1
+
+        grouped.setdefault(replica_count, {})[label] = metrics
+
+    # Create one plot per replica count
+    for rep_count, group in grouped.items():
+        if not group:
+            continue
+        suffix = f"{rep_count}r" if rep_count >= 0 else "mixed"
+        out_png = base_dir / f"{ts}_scheduler_comparison_{suffix}.png"
+        out_csv = base_dir / f"{ts}_scheduler_comparison_{suffix}.csv"
+
+        df = pd.DataFrame(group).T
+        df.to_csv(out_csv)
+        try:
+            plot_results(group, out_png)
+            print(f"Saved plot for {suffix} to {out_png}")
+        except Exception as e:
+            print(f"Could not plot for group {suffix}: {e}")
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--schedulers", nargs="+", default=["vllm", "orca", "sarathi", "llumlet"])
-    parser.add_argument("--num_requests", type=int, default=500)
+    parser.add_argument("--num_requests", type=int, default=50)
     parser.add_argument("--qps", type=float, default=1.0)
     parser.add_argument("--model", type=str, default="meta-llama/Llama-2-7b-hf")
     parser.add_argument("--device", type=str, default="a100")
-    parser.add_argument("--replicas", type=int, default=1)
+    parser.add_argument("--replicas", nargs="+", type=int, default=[1], help="Number of replicas to test (can specify multiple values)")
     parser.add_argument("--tp", type=int, default=1)
     parser.add_argument("--pp", type=int, default=1)
     parser.add_argument("--prefill_tokens", type=int, default=512)
@@ -147,6 +201,7 @@ def main():
     parser.add_argument("--sarathi_chunk_size", type=int, default=512)
     parser.add_argument("--batch_cap", type=int, default=64)
     parser.add_argument("--llumlet_max_tokens", type=int, default=2048)
+    parser.add_argument("--enable_migration", action="store_true", help="Enable live migration for llumnix (only applies when using llumlet scheduler)")
     parser.add_argument("--results_dir", type=str, default="results/scheduler_cmp")
     parser.add_argument("--skip_run", action="store_true", help="Skip running sims; only plot from existing output dirs")
     parser.add_argument("--existing_output_dirs", nargs="*", help="If skipping run, pass a list of simulator output dirs to include (overrides default naming)")
@@ -160,38 +215,36 @@ def main():
     results = {}
 
     for scheduler in args.schedulers:
-        label = scheduler
-        if args.skip_run and args.existing_output_dirs:
-            # try to find matching output dir from provided list
-            out_dir = Path(args.existing_output_dirs.pop(0))
-        else:
-            out_dir = Path("simulator_output") / f"{ts}_{scheduler}"
+        for num_replicas in args.replicas:
+            label = f"{scheduler}@{num_replicas}r"
+            if args.skip_run and args.existing_output_dirs:
+                # try to find matching output dir from provided list
+                out_dir = Path(args.existing_output_dirs.pop(0))
+            else:
+                out_dir = Path("simulator_output") / f"{ts}_{scheduler}_{num_replicas}r"
 
-            if not args.skip_run:
-                run_simulation_for_scheduler(scheduler, out_dir, args)
+                if not args.skip_run:
+                    ok = run_simulation_for_scheduler(scheduler, num_replicas, out_dir, args)
+                    if not ok:
+                        # Skip metrics collection for failed runs
+                        print(f"Skipping metrics collection for failed run {label}.")
+                        continue
 
-        metrics = collect_metrics(out_dir)
-        if metrics is None:
-            print(f"No metrics for {scheduler} (looked in {out_dir})")
-            continue
+            metrics = collect_metrics(out_dir)
+            if metrics is None:
+                print(f"No metrics for {label} (looked in {out_dir})")
+                continue
 
-        results[label] = metrics
+            results[label] = metrics
 
-    # write numeric CSV
-    df = pd.DataFrame(results).T
-    csv_out = results_dir / f"{ts}_scheduler_comparison.csv"
-    df.to_csv(csv_out)
-    print(f"Saved comparison CSV to {csv_out}")
+    # Write a combined CSV for reference
+    df_all = pd.DataFrame(results).T
+    csv_all = results_dir / f"{ts}_scheduler_comparison_all.csv"
+    df_all.to_csv(csv_all)
+    print(f"Saved combined CSV to {csv_all}")
 
-    # plot
-    png_out = results_dir / f"{ts}_scheduler_comparison.png"
-    try:
-        plot_results(results, png_out)
-        print(f"Saved comparison plot to {png_out}")
-    except Exception as e:
-        print(f"Could not produce plot: {e}")
-        print(f"If you have CSV at {csv_out} you can plot manually.")
-    print(f"Saved comparison plot to {png_out}")
+    # Produce separate plots per replica count
+    plot_results_by_replica(results, results_dir, ts)
 
 
 if __name__ == "__main__":
