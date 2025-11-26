@@ -75,8 +75,26 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
 
         # Tunables from replica scheduler config (stored in self._config)
         cfg = self._config
-        self._headroom_blocks_per_hi: int = getattr(cfg, "priority_headroom_blocks", 0)
-        self._high_priority_threshold: int = getattr(cfg, "high_priority_threshold", 1)
+        
+        # Per Algorithm 1 line 10: each priority has its own headroom budget
+        # Get num_priority_levels from request_generator_config
+        self._num_priority_levels: int = getattr(request_generator_config, "num_priority_levels", 5)
+        
+        # Per-priority headroom pools (Algorithm 1, line 10: headroomForPriority[p])
+        # Default: priority 0 gets 3000 blocks, priority 1 gets 2400 blocks, rest get 0
+        default_headroom = getattr(cfg, "priority_headroom_blocks", 2400)
+        self._headroom_for_priority: List[int] = []
+        for p in range(self._num_priority_levels):
+            if p == 0:
+                # Critical priority gets more headroom
+                self._headroom_for_priority.append(int(default_headroom * 1.25))
+            elif p == 1:
+                # High priority gets base headroom
+                self._headroom_for_priority.append(default_headroom)
+            else:
+                # Normal and lower priorities get no headroom
+                self._headroom_for_priority.append(0)
+        
         # Batch normalization denominator B (blocks per batch)
         self._batch_normalizer_B: int = getattr(cfg, "batch_blocks", 1) or 1
         # Migration stage granularity: how many KV blocks per migration stage
@@ -313,22 +331,42 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
         return self._blocks_for_request_next_step(hol)
 
     def _virtual_usage_priority_headroom(self) -> int:
-        if self._headroom_blocks_per_hi <= 0:
-            return 0
-        hi_thresh = self._high_priority_threshold
-        hi_count = 0
-        # queued
+        """
+        Calculate total headroom contribution per Algorithm 1, lines 8-10:
+        
+        Line 8: virtualUsage = physicalUsage + GetHeadroom(priority, instance)
+        Line 10: GetHeadroom(p, instance) = headroomForPriority[p] / instance.numRequests[p]
+        
+        Each priority level has its own headroom budget.
+        Total virtual usage from headroom = sum of each priority's full headroom budget
+        (if any requests exist at that priority).
+        """
+        total_headroom = 0
+        
+        # Count requests at each priority level
+        requests_per_priority = [0] * self._num_priority_levels
+        
+        # Count queued requests
         for pr, _, _req in self._priority_queue:
-            if pr <= hi_thresh:
-                hi_count += 1
-        # running (approximate: allocated requests with high priority)
+            if 0 <= pr < self._num_priority_levels:
+                requests_per_priority[pr] += 1
+        
+        # Count running requests
         for rid in list(self._allocation_map.keys()):
             req = self._request_index.get(rid)
-            if req and getattr(req, "priority", 0) <= hi_thresh:
-                hi_count += 1
-        if hi_count == 0:
-            return 0
-        return int(math.ceil(self._headroom_blocks_per_hi / max(1, hi_count)))
+            if req:
+                pr = getattr(req, "priority", 0)
+                if 0 <= pr < self._num_priority_levels:
+                    requests_per_priority[pr] += 1
+        
+        # Per Algorithm 1 line 10: for each priority with requests,
+        # headroom contribution = headroomForPriority[p] / numRequests[p] * numRequests[p]
+        # This simplifies to: if numRequests[p] > 0, add full headroomForPriority[p]
+        for priority in range(self._num_priority_levels):
+            if requests_per_priority[priority] > 0 and self._headroom_for_priority[priority] > 0:
+                total_headroom += self._headroom_for_priority[priority]
+        
+        return total_headroom
 
     def _virtual_usage_drain(self) -> int:
         if not self._is_draining:
