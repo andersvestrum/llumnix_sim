@@ -115,6 +115,12 @@ class Simulator:
             # Let the scheduler process outstanding decode/prefill steps
             while not self._scheduler.is_empty():
                 leftover_events = self._scheduler.step()
+                
+                # Safety check: if no events produced, scheduler is stuck; break to avoid infinite loop
+                if not leftover_events:
+                    logger.warning("Drain loop produced no events; breaking to avoid infinite loop")
+                    break
+                
                 self._add_events(leftover_events)
 
                 # ================================
@@ -166,7 +172,7 @@ class Simulator:
         for request in requests:
             self._add_event(RequestArrivalEvent(request.arrived_at, request))
         
-        # Initialize rebalancing for Llumnix scheduler
+        # Initialize rebalancing and auto-scaling for Llumnix scheduler
         if self._config.cluster_config.global_scheduler_config.get_type() == GlobalSchedulerType.LLUMNIX:
             llumnix_config = self._config.cluster_config.global_scheduler_config
             if (hasattr(llumnix_config, 'enable_migration') and 
@@ -177,6 +183,16 @@ class Simulator:
                 self._add_event(RebalanceEvent(initial_rebalance_time))
                 logger.info(
                     f"Llumnix rebalancing enabled with interval {llumnix_config.rebalance_interval}s"
+                )
+                
+                # Schedule first auto-scale check event (every 1 second)
+                from vidur.events.autoscale_event import AutoScaleEvent
+                autoscale_interval = getattr(llumnix_config, 'autoscale_interval', 1.0)
+                self._add_event(AutoScaleEvent(autoscale_interval, autoscale_interval))
+                logger.info(
+                    f"Llumnix auto-scaling enabled with interval {autoscale_interval}s "
+                    f"(scale_out at avgF<{llumnix_config.autoscale_low}, "
+                    f"scale_in at avgF>{llumnix_config.autoscale_high})"
                 )
             elif hasattr(llumnix_config, 'enable_migration') and llumnix_config.enable_migration:
                 logger.warning(

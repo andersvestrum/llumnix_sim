@@ -5,6 +5,9 @@ from vidur.entities import Request
 from vidur.scheduler.global_scheduler.base_global_scheduler import BaseGlobalScheduler
 from vidur.scheduler.replica_scheduler.llumlet_replica_scheduler import LlumletLocalScheduler
 from vidur.execution_time_predictor import ExecutionTimePredictorRegistry
+from vidur.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class LlumnixGlobalScheduler(BaseGlobalScheduler):
@@ -201,10 +204,30 @@ class LlumnixGlobalScheduler(BaseGlobalScheduler):
             if dst._is_draining:
                 continue
 
-            mig = src.begin_migration_to(dst)
-            if mig:
-                migrations.append(mig)
-                self._migration_count += 1
+            # CRITICAL: When source is DRAINING, migrate ALL requests, not just one
+            # Keep calling begin_migration_to() until source is empty or destination full
+            is_draining = src._is_draining
+            mig_count = 0
+            while True:
+                mig = src.begin_migration_to(dst)
+                if mig:
+                    migrations.append(mig)
+                    self._migration_count += 1
+                    mig_count += 1
+                else:
+                    # No more migrations available
+                    break
+                
+                # If not draining, only do one migration per rebalance
+                if not is_draining:
+                    break
+            
+            # Log drain migrations (they happen in batches)
+            if is_draining and mig_count > 0:
+                logger.info(
+                    f"[Llumnix Drain] Replica {src_rid} → {dst_rid}: "
+                    f"migrated {mig_count} requests (draining)"
+                )
 
         return migrations
 
@@ -239,24 +262,31 @@ class LlumnixGlobalScheduler(BaseGlobalScheduler):
         }
     
 
-    def _make_replica_schedule_event(self, rid, batch):
-        from vidur.events import ReplicaScheduleEvent
-        t = self.current_time  # or however BaseGlobalScheduler tracks time
-        return ReplicaScheduleEvent(t, rid, batch)
-
-
     def step(self):
+        """
+        Llumnix global scheduler step:
+        1. Place new requests onto replicas (schedule())
+        2. Ask each replica for a batch via _get_next_batch()
+        3. Emit BatchStageArrivalEvent for each batch (advances replicas' stage schedulers)
+        """
+        from vidur.events.batch_stage_arrival_event import BatchStageArrivalEvent
+        
         events = []
 
         # 1. Place any remaining global requests
         assignments = self.schedule()
-        # (assignments are ignored for event creation)
+        # (assignments are ignored for event creation; llumlets handle enqueue_request)
 
         # 2. Ask each replica for a batch
         for rid, sched in self._replica_schedulers.items():
             batch = sched._get_next_batch()
+            
+            # 3. Emit BatchStageArrivalEvent (tells stage schedulers to process this batch)
+            # stage_id is 0 for single-stage replicas, or incremental for multi-stage
             if batch:
-                events.append(self._make_replica_schedule_event(rid, batch))
+                events.append(
+                    BatchStageArrivalEvent(self.current_time, rid, 0, batch)
+                )
 
         return events
 

@@ -543,6 +543,18 @@ class LlumnixGlobalSchedulerConfig(BaseGlobalSchedulerConfig):
     migration_overhead_ms: float = field(
         default=5.0, metadata={"help": "Fixed overhead per migration (milliseconds)."}
     )
+    
+    autoscale_low: float = field(
+        default=-0.5, metadata={"help": "Scale out if average freeness falls below this."}
+    )
+    
+    autoscale_high: float = field(
+        default=1.5, metadata={"help": "Scale in if average freeness rises above this."}
+    )
+    
+    autoscale_interval: float = field(
+        default=1.0, metadata={"help": "Interval for checking autoscaling conditions (seconds)."}
+    )
 
     @staticmethod
     def get_type():
