@@ -66,3 +66,32 @@ class RebalanceEvent(BaseEvent):
                 for req_id, src, tgt in self._migrations
             ],
         }
+
+    def to_chrome_trace(self):
+        """
+        Generate Chrome trace events for rebalancing decisions.
+        Shows when and how many migrations were planned.
+        """
+        if not self._migrations:
+            return []
+        
+        return [{
+            "name": f"Rebalance ({len(self._migrations)} migrations)",
+            "cat": "rebalance",
+            "ph": "i",  # Instant event
+            "ts": self.time * 1e6,
+            "pid": -1,  # Special PID for global scheduler events
+            "tid": 0,
+            "s": "g",  # Global scope
+            "args": {
+                "num_migrations": len(self._migrations),
+                "migrations": [
+                    {
+                        "request_id": req_id,
+                        "source": src,
+                        "target": tgt
+                    }
+                    for req_id, src, tgt in self._migrations
+                ],
+            }
+        }]

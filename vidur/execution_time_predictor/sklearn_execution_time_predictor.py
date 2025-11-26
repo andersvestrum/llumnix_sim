@@ -833,6 +833,27 @@ class SklearnExecutionTimePredictor(BaseExecutionTimePredictor):
 
         return self._predictions["attn_kv_cache_save"][(num_tokens,)]
 
+    def _find_valid_prediction_key(self, predictions_dict: dict, target_key: tuple) -> tuple:
+        """
+        Find a valid key in the predictions dictionary. If exact key doesn't exist,
+        clamp to the largest key with same length to avoid KeyError on out-of-bounds values.
+        """
+        if target_key in predictions_dict:
+            return target_key
+        
+        # Find all keys with same length
+        valid_keys = [k for k in predictions_dict.keys() if len(k) == len(target_key)]
+        if not valid_keys:
+            return target_key  # Fallback, will likely error but with original values
+        
+        # Clamp each dimension independently to the maximum valid value
+        clamped_key = tuple(
+            min(target_key[i], max(k[i] for k in valid_keys if isinstance(k, tuple)))
+            for i in range(len(target_key))
+        )
+        
+        return clamped_key if clamped_key in predictions_dict else valid_keys[0]
+
     def _get_attention_decode_execution_time(self, batch: Batch) -> float:
         (
             decode_batch_size,
@@ -841,9 +862,10 @@ class SklearnExecutionTimePredictor(BaseExecutionTimePredictor):
         if decode_batch_size == 0:
             return 0
 
-        return self._predictions["attn_decode"][
-            (decode_batch_size, decode_avg_kv_cache_size)
-        ] * (
+        key = (decode_batch_size, decode_avg_kv_cache_size)
+        valid_key = self._find_valid_prediction_key(self._predictions["attn_decode"], key)
+        
+        return self._predictions["attn_decode"][valid_key] * (
             1
             + self._attention_decode_batching_overhead_fraction
             * int(decode_batch_size > 1)
@@ -860,9 +882,10 @@ class SklearnExecutionTimePredictor(BaseExecutionTimePredictor):
         agg_kv_cache_size = sum(kv_cache_sizes)
         agg_prefill_chunk_size = sum([x**2 for x in prefill_chunk_sizes]) ** 0.5
 
-        return self._predictions["attn_prefill"][
-            (agg_kv_cache_size, round(agg_prefill_chunk_size) ** 2)
-        ] * (
+        key = (agg_kv_cache_size, round(agg_prefill_chunk_size) ** 2)
+        valid_key = self._find_valid_prediction_key(self._predictions["attn_prefill"], key)
+        
+        return self._predictions["attn_prefill"][valid_key] * (
             1
             + self._attention_prefill_batching_overhead_fraction
             * int(len(prefill_params) > 1)

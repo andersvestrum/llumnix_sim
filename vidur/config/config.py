@@ -15,6 +15,7 @@ from vidur.logger import init_logger
 from vidur.types import (
     ExecutionTimePredictorType,
     GlobalSchedulerType,
+    PriorityDistributionType,
     ReplicaSchedulerType,
     RequestGeneratorType,
     RequestIntervalGeneratorType,
@@ -217,7 +218,15 @@ class SyntheticRequestGeneratorConfig(BaseRequestGeneratorConfig):
     )
     num_priority_levels: int = field(
         default=1,
-        metadata={"help": "Number of priority levels to assign to synthetic requests."},
+        metadata={"help": "Number of priority levels to assign to synthetic requests. 0=highest priority."},
+    )
+    priority_distribution_type: int = field(
+        default=PriorityDistributionType.ROUND_ROBIN,
+        metadata={"help": "Distribution type for assigning priorities (ROUND_ROBIN=1, UNIFORM=2, NORMAL=3, POWER_LAW=4, ENTERPRISE=5, BURSTIER=6, TIME_OF_DAY=7, TRAFFIC_CLASS=8)."},
+    )
+    priority_weights: Optional[List[float]] = field(
+        default=None,
+        metadata={"help": "Custom weights for each priority level (must sum to 1.0). If None, uses distribution-specific defaults."},
     )
 
     def __post_init__(self):
@@ -249,6 +258,18 @@ class TraceRequestGeneratorConfig(BaseRequestGeneratorConfig):
     max_tokens: int = field(
         default=4096,
         metadata={"help": "Maximum tokens for the trace request generator."},
+    )
+    num_priority_levels: int = field(
+        default=1,
+        metadata={"help": "Number of priority levels. If trace has priority column, this is ignored."},
+    )
+    priority_distribution_type: int = field(
+        default=PriorityDistributionType.UNIFORM,
+        metadata={"help": "Distribution for synthetic priorities if trace lacks priority column."},
+    )
+    priority_weights: Optional[List[float]] = field(
+        default=None,
+        metadata={"help": "Custom priority weights if trace lacks priority column."},
     )
 
     @staticmethod
@@ -542,6 +563,18 @@ class LlumnixGlobalSchedulerConfig(BaseGlobalSchedulerConfig):
     
     migration_overhead_ms: float = field(
         default=5.0, metadata={"help": "Fixed overhead per migration (milliseconds)."}
+    )
+    
+    autoscale_low: float = field(
+        default=-0.5, metadata={"help": "Scale out if average freeness falls below this."}
+    )
+    
+    autoscale_high: float = field(
+        default=1.5, metadata={"help": "Scale in if average freeness rises above this."}
+    )
+    
+    autoscale_interval: float = field(
+        default=1.0, metadata={"help": "Interval for checking autoscaling conditions (seconds)."}
     )
 
     @staticmethod
