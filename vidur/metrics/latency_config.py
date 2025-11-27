@@ -35,7 +35,6 @@ BASE_COMMAND = [
     "--linear_regression_execution_time_predictor_config_prediction_max_batch_size 32",
     "--linear_regression_execution_time_predictor_config_prediction_max_tokens_per_request 8192",
     "--linear_regression_execution_time_predictor_config_no_cache",
-    # Keep caching fully disabled for latency tests.
     "--metrics_config_cache_dir /tmp/vidur_latency_no_cache",
     "--time_limit 60",
     "--metrics_config_enable_chrome_trace",
@@ -95,6 +94,7 @@ PRIORITY_DISTRIBUTIONS = [
 ]
 
 PRIORITY_LEVELS = [1, 2, 3, 4, 5]
+REQUEST_COUNTS = [500, 2000]
 
 
 def _apply_priority_distribution(cmd: str, dist_type: int) -> str:
@@ -135,25 +135,47 @@ def _apply_priority_levels(cmd: str, num_levels: int) -> str:
     return " ".join(filtered)
 
 
-def _expand_tests_with_distributions_and_levels(base_tests):
+def _apply_num_requests(cmd: str, num_requests: int) -> str:
+    """Ensure the command sets the requested number of synthetic requests."""
+    tokens = cmd.split()
+    filtered = []
+    skip = False
+    for tok in tokens:
+        if skip:
+            skip = False
+            continue
+        if tok == "--synthetic_request_generator_config_num_requests":
+            skip = True
+            continue
+        filtered.append(tok)
+    filtered.append(f"--synthetic_request_generator_config_num_requests {num_requests}")
+    return " ".join(filtered)
+
+
+def _expand_tests_with_distributions_levels_and_requests(base_tests):
     expanded = []
     for test in base_tests:
         for num_levels in PRIORITY_LEVELS:
             level_cmd = _apply_priority_levels(test["cmd"], num_levels)
-            for dist in PRIORITY_DISTRIBUTIONS:
-                dist_suffix = f"dist{dist['type']}_{dist['slug']}"
-                level_suffix = f"lvl{num_levels}"
-                expanded.append(
-                    {
-                        "name": f"{test['name']}_{level_suffix}_{dist_suffix}",
-                        "description": (
-                            f"{test['description']} Priority levels: {num_levels}. "
-                            f"Priority distribution: {dist['name']} (type={dist['type']})."
-                        ),
-                        "cmd": _apply_priority_distribution(level_cmd, dist["type"]),
-                    }
-                )
+            for num_requests in REQUEST_COUNTS:
+                req_cmd = _apply_num_requests(level_cmd, num_requests)
+                for dist in PRIORITY_DISTRIBUTIONS:
+                    dist_suffix = f"dist{dist['type']}_{dist['slug']}"
+                    level_suffix = f"lvl{num_levels}"
+                    req_suffix = f"req{num_requests}"
+                    expanded.append(
+                        {
+                            "name": f"{test['name']}_{level_suffix}_{req_suffix}_{dist_suffix}",
+                            "description": (
+                                f"{test['description']} "
+                                f"Priority levels: {num_levels}. "
+                                f"Requests: {num_requests}. "
+                                f"Priority distribution: {dist['name']} (type={dist['type']})."
+                            ),
+                            "cmd": _apply_priority_distribution(req_cmd, dist["type"]),
+                        }
+                    )
     return expanded
 
 
-LATENCY_TESTS = _expand_tests_with_distributions_and_levels(BASE_LATENCY_TESTS)
+LATENCY_TESTS = _expand_tests_with_distributions_levels_and_requests(BASE_LATENCY_TESTS)
