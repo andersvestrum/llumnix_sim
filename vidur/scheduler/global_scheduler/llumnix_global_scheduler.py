@@ -192,8 +192,7 @@ class LlumnixGlobalScheduler(BaseGlobalScheduler):
                 # Pick replica with max F
                 rid = max(candidates, key=lambda x: x[1])[0]
 
-                # Send request
-                self._replica_schedulers[rid].enqueue_request(req)
+                # Add to assignments (GlobalScheduleEvent will call add_request)
                 assignments.append((rid, req))
 
         return assignments
@@ -320,10 +319,54 @@ class LlumnixGlobalScheduler(BaseGlobalScheduler):
 
 
     def set_draining(self, replica_ids: List[int], draining: bool = True) -> None:
+        """Mark replicas as draining (or not). Llumnix-compliant scale-in."""
         for rid in replica_ids:
-            sch = self._replica_schedulers.get(rid)
-            if sch and hasattr(sch, 'set_draining'):
-                sch.set_draining(draining)
+            if rid in self._replica_schedulers:
+                sch = self._replica_schedulers[rid]
+                if hasattr(sch, '_is_draining'):
+                    old_val = sch._is_draining
+                    sch._is_draining = draining
+                    logger.info(
+                        f"[GlobalScheduler] Replica {rid} draining flag changed: {old_val} → {draining}"
+                    )
+
+    def add_replica(self, replica) -> int:
+        """
+        Dynamically add a new replica to the global scheduler for scale-out.
+        
+        Args:
+            replica: The Replica instance to add
+            
+        Returns:
+            The replica ID of the newly added replica
+        """
+        rid = replica.id
+        
+        # Add to replicas dict
+        self._replicas[rid] = replica
+        self._num_replicas = len(self._replicas)
+        
+        # Create execution time predictor for this replica
+        execution_time_predictor = ExecutionTimePredictorRegistry.get(
+            self._config.execution_time_predictor_config.get_type(),
+            predictor_config=self._config.execution_time_predictor_config,
+            replica_config=self._config.cluster_config.replica_config,
+            replica_scheduler_config=self._config.cluster_config.replica_scheduler_config,
+            metrics_config=self._config.metrics_config,
+        )
+        
+        # Create replica scheduler for the new replica
+        self._replica_schedulers[rid] = LlumletLocalScheduler(
+            self._config.cluster_config.replica_config,
+            self._config.cluster_config.replica_scheduler_config,
+            self._config.request_generator_config,
+            replica,
+            replica.num_pipeline_stages,
+            execution_time_predictor,
+        )
+        
+        logger.info(f"[GlobalScheduler] Added replica {rid} to scheduler (total replicas: {self._num_replicas})")
+        return rid
 
     # -------------------- Optional stats --------------------
     def get_migration_stats(self) -> dict:

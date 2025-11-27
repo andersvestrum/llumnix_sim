@@ -49,6 +49,7 @@ class Simulator:
             self._cluster.replicas,
         )
         BaseEvent.global_scheduler_ref = self._scheduler
+        BaseEvent.cluster_ref = self._cluster
 
         self._init_event_queue()
 
@@ -186,13 +187,17 @@ class Simulator:
                 )
                 
                 # Schedule first auto-scale check event (every 1 second)
+                # Includes warm-up period to prevent premature scale-in during load stabilization
                 from vidur.events.autoscale_event import AutoScaleEvent
                 autoscale_interval = getattr(llumnix_config, 'autoscale_interval', 1.0)
-                self._add_event(AutoScaleEvent(autoscale_interval, autoscale_interval))
+                autoscale_warmup = getattr(llumnix_config, 'autoscale_warmup_period', 5.0)
+                max_replicas = self._config.cluster_config.num_replicas
+                self._add_event(AutoScaleEvent(autoscale_interval, autoscale_interval, autoscale_warmup, max_replicas))
                 logger.info(
                     f"Llumnix auto-scaling enabled with interval {autoscale_interval}s "
                     f"(scale_out at avgF<{llumnix_config.autoscale_low}, "
-                    f"scale_in at avgF>{llumnix_config.autoscale_high})"
+                    f"scale_in at avgF>{llumnix_config.autoscale_high}, "
+                    f"warmup={autoscale_warmup}s, max_replicas={max_replicas})"
                 )
             elif hasattr(llumnix_config, 'enable_migration') and llumnix_config.enable_migration:
                 logger.warning(

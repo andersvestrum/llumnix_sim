@@ -685,7 +685,59 @@ class MetricsStore:
         if not self._config.store_utilization_metrics:
             return
 
+        # Dynamically expand metrics arrays if replica_id exceeds current tracking
+        self._ensure_replica_metrics_exist(replica_id)
+        
         self._replica_memory_usage[replica_id - 1].put(time, memory_usage_percent)
+
+    def _ensure_replica_metrics_exist(self, replica_id: int) -> None:
+        """
+        Ensure metrics arrays are large enough to track the given replica_id.
+        This supports dynamic scale-out by expanding metrics on-demand.
+        
+        Args:
+            replica_id: 1-based replica identifier
+        """
+        required_size = replica_id
+        current_size = len(self._replica_memory_usage)
+        
+        if required_size > current_size:
+            # Expand all replica-level metrics arrays
+            for _ in range(current_size, required_size):
+                # Add memory usage tracking
+                self._replica_memory_usage.append(
+                    SeriesAverageMeter(
+                        TIME_STR,
+                        MEMORY_USAGE_STR,
+                        self._config.save_table_to_wandb,
+                    )
+                )
+                self._replica_memory_usage[-1].put(0, 0)
+                
+                # Add busy time and MFU tracking for each stage
+                self._replica_busy_time.append([])
+                self._replica_mfu.append([])
+                
+                for stage_idx in range(self._num_pipeline_stages):
+                    self._replica_busy_time[-1].append(
+                        SeriesAverageMeter(
+                            TIME_STR,
+                            BUSY_TIME_PERCENT,
+                            self._config.save_table_to_wandb,
+                        )
+                    )
+                    self._replica_busy_time[-1][stage_idx].put(0, 0)
+                    
+                    self._replica_mfu[-1].append(
+                        SeriesAverageMeter(
+                            TIME_STR,
+                            UTILIZATION_STR,
+                            save_table_to_wandb=self._config.save_table_to_wandb,
+                        )
+                    )
+                    self._replica_mfu[-1][stage_idx].put(0, 0)
+            
+            logger.info(f"[MetricsStore] Expanded replica metrics from {current_size} to {required_size} replicas")
 
     @if_write_metrics
     def on_replica_stage_schedule(
@@ -699,6 +751,9 @@ class MetricsStore:
         if not self._config.store_utilization_metrics:
             return
 
+        # Dynamically expand metrics arrays if replica_id exceeds current tracking
+        self._ensure_replica_metrics_exist(replica_id)
+        
         self._replica_busy_time[replica_id - 1][stage_id - 1].put(time, 100)
         mfu = self._mfu_calculator.get_mfu(batch_stage)
         self._replica_mfu[replica_id - 1][stage_id - 1].put(time, mfu)
