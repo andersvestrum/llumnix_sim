@@ -75,10 +75,36 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
 
         # Tunables from replica scheduler config (stored in self._config)
         cfg = self._config
-        self._headroom_blocks_per_hi: int = getattr(cfg, "priority_headroom_blocks", 0)
-        self._high_priority_threshold: int = getattr(cfg, "high_priority_threshold", 1)
-        # Batch normalization denominator B (blocks per batch)
-        self._batch_normalizer_B: int = getattr(cfg, "batch_blocks", 1) or 1
+        
+        # Per Algorithm 1 line 10: each priority has its own headroom budget
+        # Get num_priority_levels from request_generator_config
+        self._num_priority_levels: int = getattr(request_generator_config, "num_priority_levels", 5)
+        
+        # Per-priority headroom pools (Algorithm 1, line 10: headroomForPriority[p])
+        # Headroom should be scaled relative to replica capacity (M = num_blocks)
+        # Paper uses headroom as fraction of capacity, not absolute value
+        # Graduated headroom: 20-10-5-0-0 for priorities 0-4
+        M = max(1, cfg.num_blocks)
+        default_headroom = getattr(cfg, "priority_headroom_blocks", int(M * 0.10))  # 10% default
+        self._headroom_for_priority: List[int] = []
+        for p in range(self._num_priority_levels):
+            if p == 0:
+                # Highest priority: 20% of capacity
+                self._headroom_for_priority.append(int(M * 0.20))
+            elif p == 1:
+                # Second priority: 10% of capacity
+                self._headroom_for_priority.append(int(M * 0.10))
+            elif p == 2:
+                # Third priority: 5% of capacity
+                self._headroom_for_priority.append(int(M * 0.05))
+            else:
+                # Lower priorities (3-4): no headroom
+                self._headroom_for_priority.append(0)
+        
+        # NOTE: Batch normalizer B is now DYNAMIC (current batch size = len(allocation_map))
+        # Previously used static config value, now computed on-demand in report_freeness()
+        # per paper Section 4.4.1: "batch size determines consumption speed"
+        
         # Migration stage granularity: how many KV blocks per migration stage
         self._migration_stage_blocks: int = getattr(cfg, "migration_stage_blocks", 1) or 1
 
@@ -91,11 +117,11 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
     # -------------------- Queueing & batching --------------------
     def add_request(self, request: Request) -> None:
         """
-        Override BaseReplicaScheduler.add_request() to use our priority queue.
-        This is called by the global scheduler when assigning requests to replicas.
+        Override base class to use priority queue instead of simple queue.
+        This prevents duplicate queueing when GlobalScheduleEvent calls add_request().
         """
         self.enqueue_request(request)
-
+    
     def enqueue_request(self, request: Request) -> None:
         """
         Insert request into priority queue.
@@ -326,22 +352,42 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
         return self._blocks_for_request_next_step(hol)
 
     def _virtual_usage_priority_headroom(self) -> int:
-        if self._headroom_blocks_per_hi <= 0:
-            return 0
-        hi_thresh = self._high_priority_threshold
-        hi_count = 0
-        # queued
+        """
+        Calculate total headroom contribution per Algorithm 1, lines 8-10:
+        
+        Line 8: virtualUsage = physicalUsage + GetHeadroom(priority, instance)
+        Line 10: GetHeadroom(p, instance) = headroomForPriority[p] / instance.numRequests[p]
+        
+        Each priority level has its own headroom budget.
+        Total virtual usage from headroom = sum of each priority's full headroom budget
+        (if any requests exist at that priority).
+        """
+        total_headroom = 0
+        
+        # Count requests at each priority level
+        requests_per_priority = [0] * self._num_priority_levels
+        
+        # Count queued requests
         for pr, _, _req in self._priority_queue:
-            if pr <= hi_thresh:
-                hi_count += 1
-        # running (approximate: allocated requests with high priority)
+            if 0 <= pr < self._num_priority_levels:
+                requests_per_priority[pr] += 1
+        
+        # Count running requests
         for rid in list(self._allocation_map.keys()):
             req = self._request_index.get(rid)
-            if req and getattr(req, "priority", 0) <= hi_thresh:
-                hi_count += 1
-        if hi_count == 0:
-            return 0
-        return int(math.ceil(self._headroom_blocks_per_hi / max(1, hi_count)))
+            if req:
+                pr = getattr(req, "priority", 0)
+                if 0 <= pr < self._num_priority_levels:
+                    requests_per_priority[pr] += 1
+        
+        # Per Algorithm 1 line 10: for each priority with requests,
+        # headroom contribution = headroomForPriority[p] / numRequests[p] * numRequests[p]
+        # This simplifies to: if numRequests[p] > 0, add full headroomForPriority[p]
+        for priority in range(self._num_priority_levels):
+            if requests_per_priority[priority] > 0 and self._headroom_for_priority[priority] > 0:
+                total_headroom += self._headroom_for_priority[priority]
+        
+        return total_headroom
 
     def _virtual_usage_drain(self) -> int:
         if not self._is_draining:
@@ -357,9 +403,21 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
         )
 
     def report_freeness(self) -> float:
+        """
+        Llumnix freeness metric: F = (M - ΣV) / B
+        
+        Per paper Section 4.4.1: "We divide it by the batch size because it 
+        determines the consumption speed, i.e., the number of new tokens per 
+        iteration. Thus the metric suggests how many iterations the batch can 
+        still run for."
+        
+        B = current batch size (number of running requests), NOT static config.
+        Each running request consumes ~1 block per decode iteration.
+        """
         M = max(1, self._config.num_blocks)
         SigmaV = self._sum_virtual_usage()
-        B = max(1, self._batch_normalizer_B)
+        # B = DYNAMIC batch size (consumption rate in blocks/iteration)
+        B = max(1, len(self._allocation_map))
         return (M - SigmaV) / B  # negative allowed
 
     def report_normal_priority_freeness(self) -> float:
@@ -369,17 +427,31 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
         
         This excludes priority headroom from high-priority requests to avoid
         over-provisioning the cluster due to virtual usage inflation.
+        
+        B = current batch size (dynamic), not static config value.
         """
         M = max(1, self._config.num_blocks)
         # Sum virtual usage WITHOUT priority headroom
-        SigmaV = (
-            self._virtual_usage_physical()
-            + self._virtual_usage_hol_demand()
-            + self._virtual_usage_drain()
-            # Intentionally omit _virtual_usage_priority_headroom()
-        )
-        B = max(1, self._batch_normalizer_B)
-        return (M - SigmaV) / B
+        physical = self._virtual_usage_physical()
+        hol = self._virtual_usage_hol_demand()
+        drain = self._virtual_usage_drain()
+        SigmaV = physical + hol + drain
+        # B = DYNAMIC batch size (consumption rate in blocks/iteration)
+        B = max(1, len(self._allocation_map))
+        
+        freeness = (M - SigmaV) / B
+        
+        # Debug log when freeness is constant/negative (potential overload)
+        if freeness < -100 and self._replica_id == 0:  # Only log from replica 0 to avoid spam
+            logger.debug(
+                f"[Replica {self._replica_id}] Normal freeness={freeness:.1f}: "
+                f"M={M}, physical={physical}, hol={hol}, drain={drain}, "
+                f"SigmaV={SigmaV}, B={B}, "
+                f"queue_len={len(self._priority_queue)}, "
+                f"alloc_size={len(self._allocation_map)}"
+            )
+        
+        return freeness
 
     def has_capacity(self, num_blocks: int = 1) -> bool:
         return self.can_allocate(num_blocks)
@@ -581,17 +653,6 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
             and len(self._migrations_out) == 0
         )
 
-    def report_freeness(self) -> float:
-        """
-        Llumnix freeness metric: F = (M - ΣV) / B
-        where M = total memory blocks, ΣV = sum of virtual usages, B = batch size.
-        Represents how many more decode iterations the batch can run for.
-        """
-        M = max(1, self._config.num_blocks)
-        sigma_v = self._sum_virtual_usage()
-        B = max(1, self._batch_normalizer_B)
-        return (M - sigma_v) / B
-
     def _compute_temperature(self) -> float:
         """
         Returns virtual usage as a temperature (can exceed 1.0 when overloaded).
@@ -616,28 +677,34 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
         Chrome trace color bucket based on temperature (freeness metric).
         Maps temperature → Chrome trace *reserved* color name.
         
-        THRESHOLDS (original, showing freeness transitions):
-        - 0.10 (10%): transition from good → rail_idle
-        - 0.25 (25%): transition from rail_idle → rail_animation
-        - 0.50 (50%): transition from rail_animation → terrible
-        - 0.75 (75%): transition from terrible → bad
+        THRESHOLDS (adjusted for 20-10-5% headroom baseline):
+        With current headroom settings (20%+10%+5% ≈ 34% of capacity reserved),
+        even idle replicas have baseline temperature ~0.34.
+        
+        Adjusted thresholds to show meaningful color progression:
+        - < 0.40 (40%):  good (green) - idle/very light load
+        - < 0.55 (55%):  rail_idle (light green) - light load
+        - < 0.70 (70%):  rail_animation (yellow) - moderate load
+        - < 0.85 (85%):  terrible (orange) - high load, nearing capacity
+        - >= 0.85:       bad (red) - very high load / overloaded (>85%)
         
         These thresholds show when migration/draining would be triggered.
         """
         t = self._compute_temperature()
 
         # Must use only allowed Chrome names
-        # (see color_scheme for trace viewer)
-        if t < 0.10:
-            return "good"              # green (idle/light)
-        elif t < 0.25:
-            return "rail_idle"         # light green (light load)
-        elif t < 0.50:
-            return "rail_animation"    # yellow (moderate load)
-        elif t < 0.75:
-            return "terrible"          # orange (high load)
+        # Adjusted thresholds for 20-10-5% headroom (baseline ~34% of capacity)
+        # Even idle replicas have temperature ~0.34 due to headroom reservation
+        if t < 0.40:
+            return "good"              # green (idle/very light, below 40%)
+        elif t < 0.55:
+            return "rail_idle"         # light green (light load, 40-55%)
+        elif t < 0.70:
+            return "rail_animation"    # yellow (moderate load, 55-70%)
+        elif t < 0.85:
+            return "terrible"          # orange (high load, 70-85%)
         else:
-            return "bad"               # red (very high load)
+            return "bad"               # red (very high/overloaded, 85%+)
 
     def _emit_chrome_trace_batch(self, batch: Batch, start_time: float, end_time: float) -> None:
         """
