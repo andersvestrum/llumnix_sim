@@ -25,7 +25,7 @@ BASE_COMMAND = [
     "--zipf_request_length_generator_config_min_tokens 64",
     "--zipf_request_length_generator_config_prefill_to_decode_ratio 2.0",
     "--interval_generator_config_type poisson",
-    "--poisson_request_interval_generator_config_qps 100",
+    "--poisson_request_interval_generator_config_qps 1250",
     "--llumlet_scheduler_config_num_blocks 128",
     "--llumlet_scheduler_config_block_size 16",
     "--llumlet_scheduler_config_batch_size_cap 64",
@@ -55,12 +55,13 @@ BASE_LATENCY_TESTS = [
         "description": "Baseline with migration enabled at nominal 100 QPS.",
         "cmd": cmd_with_overrides(),
     },
-
     # Test Type 1: Migration & Load Balancing Sensitivity
     {
         "name": "migration_disabled",
         "description": "Migration disabled to evaluate imbalance and preemption without rescheduling.",
-        "cmd": cmd_with_overrides("--no-llumnix_global_scheduler_config_enable_migration"),
+        "cmd": cmd_with_overrides(
+            "--no-llumnix_global_scheduler_config_enable_migration"
+        ),
     },
     {
         "name": "rebalance_aggressive",
@@ -70,7 +71,6 @@ BASE_LATENCY_TESTS = [
             "--llumnix_global_scheduler_config_load_imbalance_threshold 0.1",
         ),
     },
-
     # Test Type 2: KV Capacity & Fragmentation Stress
     {
         "name": "kv_capacity_tight",
@@ -83,18 +83,18 @@ BASE_LATENCY_TESTS = [
 ]
 
 PRIORITY_DISTRIBUTIONS = [
-    #{"type": 1, "slug": "round_robin", "name": "ROUND_ROBIN"},
+    # {"type": 1, "slug": "round_robin", "name": "ROUND_ROBIN"},
     {"type": 2, "slug": "uniform", "name": "UNIFORM"},
     {"type": 3, "slug": "normal", "name": "NORMAL"},
     {"type": 4, "slug": "power_law", "name": "POWER_LAW"},
-    #{"type": 5, "slug": "enterprise", "name": "ENTERPRISE"},
-    #{"type": 6, "slug": "burstier", "name": "BURSTIER"},
-    #{"type": 7, "slug": "time_of_day", "name": "TIME_OF_DAY"},
-    #{"type": 8, "slug": "traffic_class", "name": "TRAFFIC_CLASS"},
+    # {"type": 5, "slug": "enterprise", "name": "ENTERPRISE"},
+    # {"type": 6, "slug": "burstier", "name": "BURSTIER"},
+    # {"type": 7, "slug": "time_of_day", "name": "TIME_OF_DAY"},
+    # {"type": 8, "slug": "traffic_class", "name": "TRAFFIC_CLASS"},
 ]
 
 PRIORITY_LEVELS = [1, 2, 3, 4, 5]
-REQUEST_COUNTS = [500, 2000]
+REQUEST_COUNTS = [10000, 15000]
 
 
 def _apply_priority_distribution(cmd: str, dist_type: int) -> str:
@@ -110,7 +110,9 @@ def _apply_priority_distribution(cmd: str, dist_type: int) -> str:
             skip = True
             continue
         filtered.append(tok)
-    filtered.append(f"--synthetic_request_generator_config_priority_distribution_type {dist_type}")
+    filtered.append(
+        f"--synthetic_request_generator_config_priority_distribution_type {dist_type}"
+    )
     return " ".join(filtered)
 
 
@@ -130,8 +132,12 @@ def _apply_priority_levels(cmd: str, num_levels: int) -> str:
             skip = True
             continue
         filtered.append(tok)
-    filtered.append(f"--llumnix_global_scheduler_config_num_priority_levels {num_levels}")
-    filtered.append(f"--synthetic_request_generator_config_num_priority_levels {num_levels}")
+    filtered.append(
+        f"--llumnix_global_scheduler_config_num_priority_levels {num_levels}"
+    )
+    filtered.append(
+        f"--synthetic_request_generator_config_num_priority_levels {num_levels}"
+    )
     return " ".join(filtered)
 
 
