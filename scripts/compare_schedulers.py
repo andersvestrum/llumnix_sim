@@ -74,6 +74,9 @@ def run_simulation_for_scheduler(scheduler: str, num_replicas: int, out_dir: Pat
         cmd += [
             "--global_scheduler_config_type", "llumnix",
             "--llumlet_scheduler_config_max_tokens_in_batch", str(args.llumlet_max_tokens),
+            "--llumlet_scheduler_config_batch_size_cap", str(args.batch_cap),
+            "--llumlet_scheduler_config_num_blocks", str(args.llumlet_num_blocks),
+            "--llumlet_scheduler_config_block_size", str(args.llumlet_block_size),
         ]
         # Add llumnix global scheduler config if migration is enabled
         if args.enable_migration:
@@ -127,11 +130,32 @@ def plot_results(results: dict, out_file: Path):
 
     plot_df = df[["p50", "p90", "p99"]]
 
+    # Try to extract replica count from index labels
+    replica_count = None
+    nice_labels = []
+    for label in plot_df.index:
+        if "@" in label and label.endswith("r"):
+            parts = label.split("@")
+            scheduler = parts[0]
+            try:
+                replicas = int(parts[1][:-1])
+                replica_count = replicas
+                nice_labels.append(f"{scheduler} (Replicas: {replicas})")
+            except Exception:
+                nice_labels.append(label)
+        else:
+            nice_labels.append(label)
+
+    plot_df.index = nice_labels
     figsize = (max(10, len(plot_df) * 0.8), 6)
     ax = plot_df.plot(kind="bar", figsize=figsize, colormap="plasma")
     ax.set_ylabel("Request E2E latency (s)")
-    ax.set_title("Scheduler comparison — latency percentiles")
-    ax.set_xlabel("Configuration (scheduler @ replicas)")
+    # If replica_count is set, add it to the title
+    if replica_count is not None:
+        ax.set_title(f"Scheduler Comparison — Latency Percentiles\nReplicas: {replica_count}")
+    else:
+        ax.set_title("Scheduler Comparison — Latency Percentiles")
+    ax.set_xlabel("Configuration (Scheduler and Replicas)")
     ax.grid(axis="y", linestyle="--", alpha=0.5)
 
     y_min = plot_df.min().min() * 0.95
@@ -193,7 +217,7 @@ def main():
     parser.add_argument("--qps", type=float, default=1.0)
     parser.add_argument("--model", type=str, default="meta-llama/Llama-2-7b-hf")
     parser.add_argument("--device", type=str, default="a100")
-    parser.add_argument("--replicas", nargs="+", type=int, default=[1], help="Number of replicas to test (can specify multiple values)")
+    parser.add_argument("--replicas", nargs="+", type=int, default=[1, 2, 3], help="Number of replicas to test (can specify multiple values)")
     parser.add_argument("--tp", type=int, default=1)
     parser.add_argument("--pp", type=int, default=1)
     parser.add_argument("--prefill_tokens", type=int, default=512)
@@ -201,6 +225,8 @@ def main():
     parser.add_argument("--sarathi_chunk_size", type=int, default=512)
     parser.add_argument("--batch_cap", type=int, default=64)
     parser.add_argument("--llumlet_max_tokens", type=int, default=2048)
+    parser.add_argument("--llumlet_num_blocks", type=int, default=128, help="Number of KV cache blocks for llumlet")
+    parser.add_argument("--llumlet_block_size", type=int, default=16, help="Block size (tokens per block) for llumlet")
     parser.add_argument("--enable_migration", action="store_true", help="Enable live migration for llumnix (only applies when using llumlet scheduler)")
     parser.add_argument("--results_dir", type=str, default="results/scheduler_cmp")
     parser.add_argument("--skip_run", action="store_true", help="Skip running sims; only plot from existing output dirs")
