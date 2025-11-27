@@ -11,6 +11,12 @@ Usage examples:
 Notes:
  - The script disables wandb via the WANDB_MODE env var to avoid external logging.
  - By default it runs a tiny experiment (num_requests=64) so it is fast.
+
+Fairness Considerations:
+ - vLLM and llumlet both use max_tokens_in_batch constraints (set via --max_tokens_in_batch)
+ - Orca and Sarathi only use batch_size_cap (no token limit per batch)
+ - All schedulers respect the same batch_size_cap and num_blocks settings
+ - The default max_tokens_in_batch=2048 ensures vLLM and llumlet have equal token budgets
 """
 import argparse
 import datetime
@@ -68,22 +74,40 @@ def run_simulation_for_scheduler(scheduler: str, num_replicas: int, out_dir: Pat
     if scheduler.lower() == "sarathi":
         cmd += ["--sarathi_scheduler_config_chunk_size", str(args.sarathi_chunk_size)]
 
-    # batch-cap flags for common schedulers
+    # Set common parameters for fair comparison
+    # All schedulers inherit from BaseReplicaSchedulerConfig and support these
+    common_params = [
+        f"--{scheduler}_scheduler_config_batch_size_cap", str(args.batch_cap),
+        f"--{scheduler}_scheduler_config_block_size", str(args.block_size),
+    ]
+    
+    # Only set num_blocks if explicitly provided (otherwise auto-computed from memory)
+    if args.num_blocks is not None:
+        common_params += [f"--{scheduler}_scheduler_config_num_blocks", str(args.num_blocks)]
+    
+    cmd += common_params
+
+    # Scheduler-specific configurations
     if scheduler.lower() == "llumlet":
         # llumlet is a replica scheduler used with llumnix global scheduler
         cmd += [
             "--global_scheduler_config_type", "llumnix",
-            "--llumlet_scheduler_config_max_tokens_in_batch", str(args.llumlet_max_tokens),
-            "--llumlet_scheduler_config_batch_size_cap", str(args.batch_cap),
-            "--llumlet_scheduler_config_num_blocks", str(args.llumlet_num_blocks),
-            "--llumlet_scheduler_config_block_size", str(args.llumlet_block_size),
+            "--llumlet_scheduler_config_max_tokens_in_batch", str(args.max_tokens_in_batch),
         ]
         # Add llumnix global scheduler config if migration is enabled
         if args.enable_migration:
             cmd += ["--llumnix_global_scheduler_config_enable_migration"]
-    else:
-        cap_flag = f"--{scheduler}_scheduler_config_batch_size_cap"
-        cmd += [cap_flag, str(args.batch_cap)]
+    elif scheduler.lower() == "vllm":
+        # vllm uses max_tokens_in_batch constraint
+        cmd += [
+            "--vllm_scheduler_config_max_tokens_in_batch", str(args.max_tokens_in_batch),
+        ]
+    elif scheduler.lower() == "orca":
+        # orca only uses batch_size_cap (no additional configs needed)
+        pass
+    elif scheduler.lower() == "sarathi":
+        # sarathi has no max_tokens_in_batch
+        pass
 
     env = os.environ.copy()
     env["WANDB_MODE"] = "disabled"
@@ -223,10 +247,10 @@ def main():
     parser.add_argument("--prefill_tokens", type=int, default=512)
     parser.add_argument("--decode_tokens", type=int, default=128)
     parser.add_argument("--sarathi_chunk_size", type=int, default=512)
-    parser.add_argument("--batch_cap", type=int, default=64)
-    parser.add_argument("--llumlet_max_tokens", type=int, default=2048)
-    parser.add_argument("--llumlet_num_blocks", type=int, default=128, help="Number of KV cache blocks for llumlet")
-    parser.add_argument("--llumlet_block_size", type=int, default=16, help="Block size (tokens per block) for llumlet")
+    parser.add_argument("--batch_cap", type=int, default=64, help="Max batch size for all schedulers")
+    parser.add_argument("--max_tokens_in_batch", type=int, default=2048, help="Max tokens in batch for schedulers that use it (vllm, llumlet)")
+    parser.add_argument("--block_size", type=int, default=16, help="KV cache block size (tokens per block) for all schedulers")
+    parser.add_argument("--num_blocks", type=int, default=None, help="Number of KV cache blocks (None = auto-compute from memory)")
     parser.add_argument("--enable_migration", action="store_true", help="Enable live migration for llumnix (only applies when using llumlet scheduler)")
     parser.add_argument("--results_dir", type=str, default="results/scheduler_cmp")
     parser.add_argument("--skip_run", action="store_true", help="Skip running sims; only plot from existing output dirs")
