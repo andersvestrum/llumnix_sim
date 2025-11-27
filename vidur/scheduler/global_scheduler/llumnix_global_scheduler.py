@@ -192,8 +192,7 @@ class LlumnixGlobalScheduler(BaseGlobalScheduler):
                 # Pick replica with max F
                 rid = max(candidates, key=lambda x: x[1])[0]
 
-                # Send request
-                self._replica_schedulers[rid].enqueue_request(req)
+                # Add to assignments (GlobalScheduleEvent will call add_request)
                 assignments.append((rid, req))
 
         return assignments

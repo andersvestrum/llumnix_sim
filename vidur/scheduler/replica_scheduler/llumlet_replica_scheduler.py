@@ -101,6 +101,13 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
         self._migration_stage_blocks: int = getattr(cfg, "migration_stage_blocks", 1) or 1
 
     # -------------------- Queueing & batching --------------------
+    def add_request(self, request: Request) -> None:
+        """
+        Override base class to use priority queue instead of simple queue.
+        This prevents duplicate queueing when GlobalScheduleEvent calls add_request().
+        """
+        self.enqueue_request(request)
+    
     def enqueue_request(self, request: Request) -> None:
         """
         Insert request into priority queue.
