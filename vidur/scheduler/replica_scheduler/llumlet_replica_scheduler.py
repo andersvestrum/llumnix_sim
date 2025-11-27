@@ -95,8 +95,10 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
                 # Normal and lower priorities get no headroom
                 self._headroom_for_priority.append(0)
         
-        # Batch normalization denominator B (blocks per batch)
-        self._batch_normalizer_B: int = getattr(cfg, "batch_blocks", 1) or 1
+        # NOTE: Batch normalizer B is now DYNAMIC (current batch size = len(allocation_map))
+        # Previously used static config value, now computed on-demand in report_freeness()
+        # per paper Section 4.4.1: "batch size determines consumption speed"
+        
         # Migration stage granularity: how many KV blocks per migration stage
         self._migration_stage_blocks: int = getattr(cfg, "migration_stage_blocks", 1) or 1
 
@@ -389,9 +391,21 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
         )
 
     def report_freeness(self) -> float:
+        """
+        Llumnix freeness metric: F = (M - ΣV) / B
+        
+        Per paper Section 4.4.1: "We divide it by the batch size because it 
+        determines the consumption speed, i.e., the number of new tokens per 
+        iteration. Thus the metric suggests how many iterations the batch can 
+        still run for."
+        
+        B = current batch size (number of running requests), NOT static config.
+        Each running request consumes ~1 block per decode iteration.
+        """
         M = max(1, self._config.num_blocks)
         SigmaV = self._sum_virtual_usage()
-        B = max(1, self._batch_normalizer_B)
+        # B = DYNAMIC batch size (consumption rate in blocks/iteration)
+        B = max(1, len(self._allocation_map))
         return (M - SigmaV) / B  # negative allowed
 
     def report_normal_priority_freeness(self) -> float:
@@ -401,6 +415,8 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
         
         This excludes priority headroom from high-priority requests to avoid
         over-provisioning the cluster due to virtual usage inflation.
+        
+        B = current batch size (dynamic), not static config value.
         """
         M = max(1, self._config.num_blocks)
         # Sum virtual usage WITHOUT priority headroom
@@ -410,7 +426,8 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
             + self._virtual_usage_drain()
             # Intentionally omit _virtual_usage_priority_headroom()
         )
-        B = max(1, self._batch_normalizer_B)
+        # B = DYNAMIC batch size (consumption rate in blocks/iteration)
+        B = max(1, len(self._allocation_map))
         return (M - SigmaV) / B
 
     def has_capacity(self, num_blocks: int = 1) -> bool:
@@ -612,17 +629,6 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
             and len(self._allocation_map) == 0
             and len(self._migrations_out) == 0
         )
-
-    def report_freeness(self) -> float:
-        """
-        Llumnix freeness metric: F = (M - ΣV) / B
-        where M = total memory blocks, ΣV = sum of virtual usages, B = batch size.
-        Represents how many more decode iterations the batch can run for.
-        """
-        M = max(1, self._config.num_blocks)
-        sigma_v = self._sum_virtual_usage()
-        B = max(1, self._batch_normalizer_B)
-        return (M - sigma_v) / B
 
     def _compute_temperature(self) -> float:
         """
