@@ -587,6 +587,66 @@ class LlumnixGlobalSchedulerConfig(BaseGlobalSchedulerConfig):
 
 
 @dataclass
+class InfaasGlobalSchedulerConfig(BaseGlobalSchedulerConfig):
+    alpha: float = field(
+        default=1.0,
+        metadata={"help": "Weight for queue-based component of the cost metric."},
+    )
+    beta: float = field(
+        default=1.0,
+        metadata={"help": "Weight for predicted service time in the cost metric."},
+    )
+    gamma: float = field(
+        default=1.0,
+        metadata={"help": "Weight for overload/interference penalty in the cost metric."},
+    )
+    target_latency_ms: float = field(
+        default=1000.0,
+        metadata={"help": "Soft SLO target per request (milliseconds)."},
+    )
+    ewma_alpha: float = field(
+        default=0.6,
+        metadata={"help": "Smoothing factor (0-1) for EWMA latency estimates."},
+    )
+    overload_latency_factor: float = field(
+        default=1.3,
+        metadata={"help": "Threshold factor for overload detection vs. target latency."},
+    )
+    interference_latency_factor: float = field(
+        default=1.15,
+        metadata={"help": "Threshold factor for interference detection at low queue depth."},
+    )
+    queue_depth_threshold: int = field(
+        default=2,
+        metadata={
+            "help": "Queue depth above which high latency is treated as overload."
+        },
+    )
+    interference_queue_threshold: int = field(
+        default=1,
+        metadata={
+            "help": "Queue depth treated as 'small' when detecting interference."
+        },
+    )
+    overload_cooldown: int = field(
+        default=3,
+        metadata={
+            "help": "Number of completions/time steps to keep a replica in OVERLOADED before reconsidering."
+        },
+    )
+    interference_cooldown: int = field(
+        default=2,
+        metadata={
+            "help": "Number of completions/time steps to keep a replica in INTERFERED before reconsidering."
+        },
+    )
+
+    @staticmethod
+    def get_type():
+        return GlobalSchedulerType.INFAAS
+
+
+@dataclass
 class BaseExecutionTimePredictorConfig(BasePolyConfig):
     compute_input_file: str = field(
         default="./data/profiling/compute/{DEVICE}/{MODEL}/mlp.csv",

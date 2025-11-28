@@ -1,7 +1,7 @@
 """
 Preset latency scenarios for two systems:
  - Llumnix (global) + Llumlet (replica)
- - LOR (global) + vLLM (replica)
+ - INFaaS (global) + vLLM (replica)
 
 Commands share identical workload knobs (arrival process, request lengths,
 replica model/device, predictor settings, metrics config) to keep cross-system
@@ -56,13 +56,24 @@ SYSTEMS: Dict[str, Dict[str, object]] = {
             "--llumlet_scheduler_config_batch_size_cap 64",
         ],
     },
-    "lor_vllm": {
-        "slug": "lor_vllm",
-        "label": "LOR + vLLM",
+    "infaas_vllm": {
+        "slug": "infaas_vllm",
+        "label": "INFaaS + vLLM",
         "include_llumnix_priority": False,
         "base_command": WORKLOAD_BASE
         + [
-            "--global_scheduler_config_type lor",
+            "--global_scheduler_config_type infaas",
+            "--infaas_global_scheduler_config_alpha 1.0",
+            "--infaas_global_scheduler_config_beta 1.0",
+            "--infaas_global_scheduler_config_gamma 1.0",
+            "--infaas_global_scheduler_config_target_latency_ms 1000",
+            "--infaas_global_scheduler_config_ewma_alpha 0.6",
+            "--infaas_global_scheduler_config_overload_latency_factor 1.3",
+            "--infaas_global_scheduler_config_interference_latency_factor 1.15",
+            "--infaas_global_scheduler_config_queue_depth_threshold 2",
+            "--infaas_global_scheduler_config_interference_queue_threshold 1",
+            "--infaas_global_scheduler_config_overload_cooldown 3",
+            "--infaas_global_scheduler_config_interference_cooldown 2",
             "--replica_scheduler_config_type vllm",
             "--vllm_scheduler_config_num_blocks 128",
             "--vllm_scheduler_config_block_size 16",
@@ -89,7 +100,7 @@ BASE_LATENCY_TESTS = [
         "description": "Baseline with migration enabled at nominal 100 QPS.",
         "overrides": {
             "llumnix_llumlet": [],
-            "lor_vllm": [],
+            "infaas_vllm": [],
         },
     },
     # Test Type 1: Migration & Load Balancing Sensitivity
@@ -98,7 +109,7 @@ BASE_LATENCY_TESTS = [
         "description": "Migration disabled to evaluate imbalance and preemption without rescheduling.",
         "overrides": {
             "llumnix_llumlet": ["--no-llumnix_global_scheduler_config_enable_migration"],
-            "lor_vllm": [],
+            "infaas_vllm": [],
         },
     },
     {
@@ -109,7 +120,7 @@ BASE_LATENCY_TESTS = [
                 "--llumnix_global_scheduler_config_rebalance_interval 0.01",
                 "--llumnix_global_scheduler_config_load_imbalance_threshold 0.1",
             ],
-            "lor_vllm": [],
+            "infaas_vllm": [],
         },
     },
     # Test Type 2: KV Capacity & Fragmentation Stress
@@ -121,7 +132,7 @@ BASE_LATENCY_TESTS = [
                 "--llumlet_scheduler_config_num_blocks 64",
                 "--llumlet_scheduler_config_batch_size_cap 16",
             ],
-            "lor_vllm": [
+            "infaas_vllm": [
                 "--vllm_scheduler_config_num_blocks 64",
                 "--vllm_scheduler_config_batch_size_cap 16",
             ],
@@ -246,12 +257,12 @@ def _expand_tests_with_distributions_levels_and_requests(base_tests, system_key:
 LATENCY_TESTS_LLUMNIX = _expand_tests_with_distributions_levels_and_requests(
     BASE_LATENCY_TESTS, "llumnix_llumlet"
 )
-LATENCY_TESTS_LOR = _expand_tests_with_distributions_levels_and_requests(
-    BASE_LATENCY_TESTS, "lor_vllm"
+LATENCY_TESTS_INFAAS = _expand_tests_with_distributions_levels_and_requests(
+    BASE_LATENCY_TESTS, "infaas_vllm"
 )
 LATENCY_TESTS_BY_SYSTEM: Dict[str, List[dict]] = {
     "llumnix_llumlet": LATENCY_TESTS_LLUMNIX,
-    "lor_vllm": LATENCY_TESTS_LOR,
+    "infaas_vllm": LATENCY_TESTS_INFAAS,
 }
 
 
