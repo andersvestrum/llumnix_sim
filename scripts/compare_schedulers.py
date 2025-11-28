@@ -1,23 +1,3 @@
-#!/usr/bin/env python3
-"""Run short simulations for multiple replica schedulers and plot comparison.
-
-This script is a convenience wrapper to run the simulator (`python -m vidur.main`)
-for a small synthetic workload with different replica schedulers (vllm, orca, sarathi, llumlet)
-and produce a small CSV + PNG comparing latency percentiles (P50, P90, P99).
-
-Usage examples:
-  python scripts/compare_schedulers.py --schedulers vllm orca sarathi llumlet
-
-Notes:
- - The script disables wandb via the WANDB_MODE env var to avoid external logging.
- - By default it runs a tiny experiment (num_requests=64) so it is fast.
-
-Fairness Considerations:
- - vLLM and llumlet both use max_tokens_in_batch constraints (set via --max_tokens_in_batch)
- - Orca and Sarathi only use batch_size_cap (no token limit per batch)
- - All schedulers respect the same batch_size_cap and num_blocks settings
- - The default max_tokens_in_batch=2048 ensures vLLM and llumlet have equal token budgets
-"""
 import argparse
 import datetime
 import os
@@ -28,7 +8,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 
-def run_simulation_for_scheduler(scheduler: str, num_replicas: int, out_dir: Path, args):
+def run_simulation_for_scheduler(scheduler: str, num_priority_levels: int, out_dir: Path, args):
     out_dir.mkdir(parents=True, exist_ok=True)
 
     cmd = [
@@ -40,7 +20,7 @@ def run_simulation_for_scheduler(scheduler: str, num_replicas: int, out_dir: Pat
         "--replica_config_model_name",
         args.model,
         "--cluster_config_num_replicas",
-        str(num_replicas),
+        str(args.num_replicas),
         "--replica_config_tensor_parallel_size",
         str(args.tp),
         "--replica_config_num_pipeline_stages",
@@ -61,6 +41,8 @@ def run_simulation_for_scheduler(scheduler: str, num_replicas: int, out_dir: Pat
         str(args.qps),
         "--replica_scheduler_config_type",
         scheduler,
+        "--synthetic_request_generator_config_num_priority_levels",
+        str(num_priority_levels),
         "--metrics_config_output_dir",
         str(out_dir),
         "--metrics_config_wandb_project",
@@ -117,7 +99,7 @@ def run_simulation_for_scheduler(scheduler: str, num_replicas: int, out_dir: Pat
         subprocess.run(cmd, check=True, env=env)
         return True
     except subprocess.CalledProcessError as e:
-        print(f"Run failed for {scheduler}@{num_replicas}r: {e}")
+        print(f"Run failed for {scheduler}@{num_priority_levels}p: {e}")
         return False
 
 
@@ -143,7 +125,7 @@ def collect_metrics(out_dir: Path):
     return {"p50": p50, "p90": p90, "p99": p99, "mean": mean}
 
 
-def plot_results(results: dict, out_file: Path):
+def plot_results(results: dict, out_file: Path, num_replicas: int):
     if not results:
         raise ValueError("No results provided to plot_results()")
 
@@ -154,17 +136,15 @@ def plot_results(results: dict, out_file: Path):
 
     plot_df = df[["p50", "p90", "p99"]]
 
-    # Try to extract replica count from index labels
-    replica_count = None
+    # Try to extract priority levels from index labels
     nice_labels = []
     for label in plot_df.index:
-        if "@" in label and label.endswith("r"):
+        if "@" in label and label.endswith("p"):
             parts = label.split("@")
             scheduler = parts[0]
             try:
-                replicas = int(parts[1][:-1])
-                replica_count = replicas
-                nice_labels.append(f"{scheduler} (Replicas: {replicas})")
+                priority_levels = int(parts[1][:-1])
+                nice_labels.append(f"{scheduler}")
             except Exception:
                 nice_labels.append(label)
         else:
@@ -174,12 +154,8 @@ def plot_results(results: dict, out_file: Path):
     figsize = (max(10, len(plot_df) * 0.8), 6)
     ax = plot_df.plot(kind="bar", figsize=figsize, colormap="plasma")
     ax.set_ylabel("Request E2E latency (s)")
-    # If replica_count is set, add it to the title
-    if replica_count is not None:
-        ax.set_title(f"Scheduler Comparison — Latency Percentiles\nReplicas: {replica_count}")
-    else:
-        ax.set_title("Scheduler Comparison — Latency Percentiles")
-    ax.set_xlabel("Configuration (Scheduler and Replicas)")
+    ax.set_title(f"Scheduler Comparison — Latency Percentiles\n{num_replicas} Replicas, {priority_levels} Priority Levels")
+    ax.set_xlabel("Configuration")
     ax.grid(axis="y", linestyle="--", alpha=0.5)
 
     y_min = plot_df.min().min() * 0.95
@@ -193,42 +169,42 @@ def plot_results(results: dict, out_file: Path):
     plt.close()
 
 
-def plot_results_by_replica(results: dict, base_dir: Path, ts: str):
+def plot_results_by_priority(results: dict, base_dir: Path, ts: str, num_replicas: int):
     if not results:
         print("No results to plot.")
         return
 
-    # Parse labels like "scheduler@Nr" to group by N
+    # Parse labels like "scheduler@Np" to group by N
     grouped: dict[int, dict] = {}
     for label, metrics in results.items():
         try:
-            # Expect label format: name@{N}r
+            # Expect label format: name@{N}p
             parts = label.split('@')
-            if len(parts) != 2 or not parts[1].endswith('r'):
-                replica_count = None
+            if len(parts) != 2 or not parts[1].endswith('p'):
+                priority_count = None
             else:
-                replica_count = int(parts[1][:-1])
+                priority_count = int(parts[1][:-1])
         except Exception:
-            replica_count = None
+            priority_count = None
 
-        if replica_count is None:
+        if priority_count is None:
             # Put into a special group
-            replica_count = -1
+            priority_count = -1
 
-        grouped.setdefault(replica_count, {})[label] = metrics
+        grouped.setdefault(priority_count, {})[label] = metrics
 
-    # Create one plot per replica count
-    for rep_count, group in grouped.items():
+    # Create one plot per priority count
+    for priority_count, group in grouped.items():
         if not group:
             continue
-        suffix = f"{rep_count}r" if rep_count >= 0 else "mixed"
+        suffix = f"{priority_count}p" if priority_count >= 0 else "mixed"
         out_png = base_dir / f"{ts}_scheduler_comparison_{suffix}.png"
         out_csv = base_dir / f"{ts}_scheduler_comparison_{suffix}.csv"
 
         df = pd.DataFrame(group).T
         df.to_csv(out_csv)
         try:
-            plot_results(group, out_png)
+            plot_results(group, out_png, num_replicas)
             print(f"Saved plot for {suffix} to {out_png}")
         except Exception as e:
             print(f"Could not plot for group {suffix}: {e}")
@@ -237,11 +213,12 @@ def plot_results_by_replica(results: dict, base_dir: Path, ts: str):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--schedulers", nargs="+", default=["vllm", "orca", "sarathi", "llumlet"])
-    parser.add_argument("--num_requests", type=int, default=50)
-    parser.add_argument("--qps", type=float, default=1.0)
+    parser.add_argument("--num_requests", type=int, default=400, help="Total number of requests")
+    parser.add_argument("--qps", type=float, default=2.0, help="Queries per second (affects simulation duration: ~num_requests/qps seconds)")
     parser.add_argument("--model", type=str, default="meta-llama/Llama-2-7b-hf")
     parser.add_argument("--device", type=str, default="a100")
-    parser.add_argument("--replicas", nargs="+", type=int, default=[1, 2, 3], help="Number of replicas to test (can specify multiple values)")
+    parser.add_argument("--num_replicas", type=int, default=4, help="Fixed number of replicas to use")
+    parser.add_argument("--priority_levels", nargs="+", type=int, default=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10], help="Number of priority levels to test (can specify multiple values)")
     parser.add_argument("--tp", type=int, default=1)
     parser.add_argument("--pp", type=int, default=1)
     parser.add_argument("--prefill_tokens", type=int, default=512)
@@ -265,16 +242,16 @@ def main():
     results = {}
 
     for scheduler in args.schedulers:
-        for num_replicas in args.replicas:
-            label = f"{scheduler}@{num_replicas}r"
+        for num_priority_levels in args.priority_levels:
+            label = f"{scheduler}@{num_priority_levels}p"
             if args.skip_run and args.existing_output_dirs:
                 # try to find matching output dir from provided list
                 out_dir = Path(args.existing_output_dirs.pop(0))
             else:
-                out_dir = Path("simulator_output") / f"{ts}_{scheduler}_{num_replicas}r"
+                out_dir = Path("simulator_output") / f"{ts}_{scheduler}_{num_priority_levels}p"
 
                 if not args.skip_run:
-                    ok = run_simulation_for_scheduler(scheduler, num_replicas, out_dir, args)
+                    ok = run_simulation_for_scheduler(scheduler, num_priority_levels, out_dir, args)
                     if not ok:
                         # Skip metrics collection for failed runs
                         print(f"Skipping metrics collection for failed run {label}.")
@@ -293,8 +270,8 @@ def main():
     df_all.to_csv(csv_all)
     print(f"Saved combined CSV to {csv_all}")
 
-    # Produce separate plots per replica count
-    plot_results_by_replica(results, results_dir, ts)
+    # Produce separate plots per priority level count
+    plot_results_by_priority(results, results_dir, ts, args.num_replicas)
 
 
 if __name__ == "__main__":
