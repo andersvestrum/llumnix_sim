@@ -349,7 +349,7 @@ def main():
     wandb_run = None
     try:
         wandb_run = wandb.init(
-            project=os.getenv("WANDB_PROJECT", "llumnix"),
+            project=os.getenv("WANDB_PROJECT", "llumnix-clean"),
             entity=os.getenv("WANDB_ENTITY"),
             mode=os.getenv("WANDB_MODE", "online"),
             name=run_name,

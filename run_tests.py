@@ -227,7 +227,7 @@ def run_llumnix_plots(args: argparse.Namespace) -> None:
         run_name = os.getenv("WANDB_RUN_NAME", name)
 
         wandb_run = wandb.init(
-            project=os.getenv("WANDB_PROJECT", "llumnix"),
+            project=os.getenv("WANDB_PROJECT", "llumnix-clean"),
             entity=os.getenv("WANDB_ENTITY"),
             mode=os.getenv("WANDB_MODE", "online"),
             name=run_name,
@@ -267,7 +267,7 @@ def run_comparison(args: argparse.Namespace) -> None:
 
         run_name = _derive_compare_run_name(llumnix_test["cmd"])
         wandb_run = wandb.init(
-            project=os.getenv("WANDB_PROJECT", "llumnix"),
+            project=os.getenv("WANDB_PROJECT", "llumnix-clean"),
             entity=os.getenv("WANDB_ENTITY"),
             mode=os.getenv("WANDB_MODE", "online"),
             name=run_name,
