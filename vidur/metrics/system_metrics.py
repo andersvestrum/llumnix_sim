@@ -5,7 +5,7 @@ This module mirrors the helper-driven style of `latency_analysis.py`: small
 loader utilities plus pure functions that compute aggregate metrics. It is
 purpose-built for comparing two scheduler stacks:
     - Llumnix (global) + Llumlet (replica)
-    - LOR (global) + vLLM (replica)
+    - INFaaS (global) + vLLM (replica)
 
 Metrics computed per run:
     - end-to-end latency (mean, p99)
@@ -16,7 +16,7 @@ Metrics computed per run:
     - resource usage (average instance count) and cost vs latency target
     - optional priority-aware slices (mean/p99 for highest-priority requests)
 
-Comparison helpers then compute speedups (LOR→Llumnix) so results line up with
+Comparison helpers then compute speedups (INFaaS→Llumnix) so results line up with
 the Llumnix paper reporting style.
 """
 
@@ -79,8 +79,12 @@ def _load_batch_metrics(run_dir: Path) -> pd.DataFrame:
 
 def _load_request_df(run_dir: Path) -> pd.DataFrame:
     chrome_trace_path = run_dir / "chrome_trace.json"
-    trace_events = la._load_trace_events(chrome_trace_path) if chrome_trace_path.exists() else []
-    request_priorities = la._extract_request_priorities(trace_events) if trace_events else {}
+    trace_events = (
+        la._load_trace_events(chrome_trace_path) if chrome_trace_path.exists() else []
+    )
+    request_priorities = (
+        la._extract_request_priorities(trace_events) if trace_events else {}
+    )
     return la._load_request_metrics(run_dir, request_priorities)
 
 
@@ -116,7 +120,9 @@ def _fragmentation_metrics(batch_df: pd.DataFrame, config: Dict) -> Dict[str, ob
         return {"avg_fragmentation": None, "series": pd.DataFrame()}
 
     sched_cfg = config.get("cluster_config", {}).get("replica_scheduler_config", {})
-    block_size = sched_cfg.get("block_size") or config.get("cluster_config", {}).get("replica_config", {}).get("block_size")
+    block_size = sched_cfg.get("block_size") or config.get("cluster_config", {}).get(
+        "replica_config", {}
+    ).get("block_size")
     num_blocks = sched_cfg.get("num_blocks")
 
     if not block_size or not num_blocks:
@@ -137,7 +143,9 @@ def _fragmentation_metrics(batch_df: pd.DataFrame, config: Dict) -> Dict[str, ob
     return {"avg_fragmentation": _safe_mean(frag_series), "series": series_df}
 
 
-def _resource_usage(config: Dict, latency_target: Optional[float]) -> Dict[str, Optional[float]]:
+def _resource_usage(
+    config: Dict, latency_target: Optional[float]
+) -> Dict[str, Optional[float]]:
     cluster_cfg = config.get("cluster_config", {})
     replica_cfg = cluster_cfg.get("replica_config", {})
     num_replicas = cluster_cfg.get("num_replicas") or 0
@@ -162,7 +170,9 @@ def _resource_usage(config: Dict, latency_target: Optional[float]) -> Dict[str, 
     }
 
 
-def _priority_slice_metrics(request_df: pd.DataFrame, column: str) -> Dict[str, Optional[float]]:
+def _priority_slice_metrics(
+    request_df: pd.DataFrame, column: str
+) -> Dict[str, Optional[float]]:
     if column not in request_df.columns or "priority" not in request_df.columns:
         return {"mean": None, "p99": None}
     high_prio = request_df["priority"].max()
@@ -175,7 +185,12 @@ def _priority_slice_metrics(request_df: pd.DataFrame, column: str) -> Dict[str, 
     }
 
 
-def compute_run_metrics(run_dir: Path, system: str, name: Optional[str] = None, latency_target: Optional[float] = None) -> Tuple[RunData, Dict]:
+def compute_run_metrics(
+    run_dir: Path,
+    system: str,
+    name: Optional[str] = None,
+    latency_target: Optional[float] = None,
+) -> Tuple[RunData, Dict]:
     """Load a single run directory and compute aggregate metrics."""
     request_df = _load_request_df(run_dir)
     batch_df = _load_batch_metrics(run_dir)
@@ -183,7 +198,9 @@ def compute_run_metrics(run_dir: Path, system: str, name: Optional[str] = None, 
 
     latency = _latency_stats(request_df, "request_e2e_time")
     prefill = _latency_stats(request_df, "prefill_e2e_time")
-    decode = _latency_stats(request_df, "decode_time_execution_plus_preemption_normalized")
+    decode = _latency_stats(
+        request_df, "decode_time_execution_plus_preemption_normalized"
+    )
     preemption = _preemption_metrics(request_df)
     fragmentation = _fragmentation_metrics(batch_df, config)
     resource = _resource_usage(config, latency_target or latency["p99"])
@@ -221,39 +238,64 @@ def _speedup(baseline: Optional[float], contender: Optional[float]) -> Optional[
     return float(baseline / contender)
 
 
-def compare_runs(llumnix_metrics: Dict, lor_metrics: Dict) -> Dict[str, Optional[float]]:
+def compare_runs(
+    llumnix_metrics: Dict, infaas_metrics: Dict
+) -> Dict[str, Optional[float]]:
     """
-    Compute speedups using LOR as baseline and Llumnix as contender.
+    Compute speedups using INFaaS as baseline and Llumnix as contender.
     Speedup > 1.0 means Llumnix is faster.
     """
 
     return {
-        "e2e_mean_speedup": _speedup(lor_metrics["latency"]["mean"], llumnix_metrics["latency"]["mean"]),
-        "e2e_p99_speedup": _speedup(lor_metrics["latency"]["p99"], llumnix_metrics["latency"]["p99"]),
-        "prefill_mean_speedup": _speedup(lor_metrics["prefill"]["mean"], llumnix_metrics["prefill"]["mean"]),
-        "prefill_p99_speedup": _speedup(lor_metrics["prefill"]["p99"], llumnix_metrics["prefill"]["p99"]),
-        "decode_mean_ratio": _speedup(lor_metrics["decode"]["mean"], llumnix_metrics["decode"]["mean"]),
-        "decode_p99_ratio": _speedup(lor_metrics["decode"]["p99"], llumnix_metrics["decode"]["p99"]),
+        "e2e_mean_speedup": _speedup(
+            infaas_metrics["latency"]["mean"], llumnix_metrics["latency"]["mean"]
+        ),
+        "e2e_p99_speedup": _speedup(
+            infaas_metrics["latency"]["p99"], llumnix_metrics["latency"]["p99"]
+        ),
+        "prefill_mean_speedup": _speedup(
+            infaas_metrics["prefill"]["mean"], llumnix_metrics["prefill"]["mean"]
+        ),
+        "prefill_p99_speedup": _speedup(
+            infaas_metrics["prefill"]["p99"], llumnix_metrics["prefill"]["p99"]
+        ),
+        "decode_mean_ratio": _speedup(
+            infaas_metrics["decode"]["mean"], llumnix_metrics["decode"]["mean"]
+        ),
+        "decode_p99_ratio": _speedup(
+            infaas_metrics["decode"]["p99"], llumnix_metrics["decode"]["p99"]
+        ),
         "preemption_rate_delta": None
-        if lor_metrics["preemption"]["rate"] is None or llumnix_metrics["preemption"]["rate"] is None
-        else float(lor_metrics["preemption"]["rate"] - llumnix_metrics["preemption"]["rate"]),
+        if infaas_metrics["preemption"]["rate"] is None
+        or llumnix_metrics["preemption"]["rate"] is None
+        else float(
+            infaas_metrics["preemption"]["rate"] - llumnix_metrics["preemption"]["rate"]
+        ),
         "preemption_loss_delta": None
-        if lor_metrics["preemption"]["loss"] is None or llumnix_metrics["preemption"]["loss"] is None
-        else float(lor_metrics["preemption"]["loss"] - llumnix_metrics["preemption"]["loss"]),
+        if infaas_metrics["preemption"]["loss"] is None
+        or llumnix_metrics["preemption"]["loss"] is None
+        else float(
+            infaas_metrics["preemption"]["loss"] - llumnix_metrics["preemption"]["loss"]
+        ),
         "fragmentation_delta": None
-        if lor_metrics["fragmentation"]["avg"] is None or llumnix_metrics["fragmentation"]["avg"] is None
-        else float(lor_metrics["fragmentation"]["avg"] - llumnix_metrics["fragmentation"]["avg"]),
+        if infaas_metrics["fragmentation"]["avg"] is None
+        or llumnix_metrics["fragmentation"]["avg"] is None
+        else float(
+            infaas_metrics["fragmentation"]["avg"]
+            - llumnix_metrics["fragmentation"]["avg"]
+        ),
         "cost_ratio": _speedup(
-            lor_metrics["resource"]["run_cost"], llumnix_metrics["resource"]["run_cost"]
+            infaas_metrics["resource"]["run_cost"],
+            llumnix_metrics["resource"]["run_cost"],
         ),
         "cost_per_latency_ratio": _speedup(
-            lor_metrics["resource"]["cost_vs_latency_target"],
+            infaas_metrics["resource"]["cost_vs_latency_target"],
             llumnix_metrics["resource"]["cost_vs_latency_target"],
         ),
         "priority_mean_speedup": _speedup(
-            lor_metrics["priority"]["mean"], llumnix_metrics["priority"]["mean"]
+            infaas_metrics["priority"]["mean"], llumnix_metrics["priority"]["mean"]
         ),
         "priority_p99_speedup": _speedup(
-            lor_metrics["priority"]["p99"], llumnix_metrics["priority"]["p99"]
+            infaas_metrics["priority"]["p99"], llumnix_metrics["priority"]["p99"]
         ),
     }
