@@ -79,6 +79,10 @@ def run_simulation(config_name: str, num_priority_levels: int, out_dir: Path, ar
 
     if args.num_blocks is not None:
         cmd += [f"--{replica_scheduler}_scheduler_config_num_blocks", str(args.num_blocks)]
+    
+    # Add headroom decay mode for llumlet
+    if replica_scheduler == "llumlet":
+        cmd += [f"--llumlet_scheduler_config_headroom_decay_mode", args.headroom_decay_mode]
 
     # Enable migration if requested (only for llumnix global scheduler)
     if args.enable_migration and global_scheduler == "llumnix":
@@ -232,13 +236,13 @@ def main():
     )
     
     # Simulation parameters
-    parser.add_argument("--num_requests", type=int, default=1000, 
+    parser.add_argument("--num_requests", type=int, default=800, 
                        help="Total number of requests (local test: 800, production: 2000+)")
     parser.add_argument("--qps", type=float, default=10.0, 
                        help="Queries per second (very high QPS shows priority scheduling benefits)")
     parser.add_argument("--num_replicas", type=int, default=4, 
                        help="Number of replicas (balanced load distribution)")
-    parser.add_argument("--priority_levels", nargs="+", type=int, default=[1, 2, 3, 4, 5],
+    parser.add_argument("--priority_levels", nargs="+", type=int, default=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
                        help="Priority levels to test (more levels shows scheduling benefits)")
     
     # Model/device parameters
@@ -258,6 +262,9 @@ def main():
                        help="Token limit per batch - allows mixed priority batching")
     parser.add_argument("--block_size", type=int, default=16)
     parser.add_argument("--num_blocks", type=int, default=None)
+    parser.add_argument("--headroom_decay_mode", type=str, default="exponential",
+                       choices=["linear", "exponential"],
+                       help="Headroom decay mode for llumlet: 'linear' or 'exponential'")
     parser.add_argument("--enable_migration", action="store_true",
                        help="Enable live migration for llumnix")
     

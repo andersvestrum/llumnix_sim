@@ -358,6 +358,10 @@ class LlumletSchedulerConfig(BaseReplicaSchedulerConfig):
         default=2048,
         metadata={"help": "Maximum tokens per batch for Llumnlet."},
     )
+    headroom_decay_mode: str = field(
+        default="exponential",
+        metadata={"help": "Headroom decay mode: 'linear' or 'exponential'. Controls how headroom decreases across priority levels."},
+    )
 
     @staticmethod
     def get_type():
