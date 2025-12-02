@@ -213,8 +213,8 @@ def plot_results_by_priority(results: dict, base_dir: Path, ts: str, num_replica
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--schedulers", nargs="+", default=["vllm", "orca", "sarathi", "llumlet"])
-    parser.add_argument("--num_requests", type=int, default=400, help="Total number of requests")
-    parser.add_argument("--qps", type=float, default=2.0, help="Queries per second (affects simulation duration: ~num_requests/qps seconds)")
+    parser.add_argument("--num_requests", type=int, default=800, help="Total number of requests")
+    parser.add_argument("--qps", type=float, default=8.0, help="Queries per second (affects simulation duration: ~num_requests/qps seconds)")
     parser.add_argument("--model", type=str, default="meta-llama/Llama-2-7b-hf")
     parser.add_argument("--device", type=str, default="a100")
     parser.add_argument("--num_replicas", type=int, default=4, help="Fixed number of replicas to use")

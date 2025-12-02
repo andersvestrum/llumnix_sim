@@ -236,7 +236,7 @@ def main():
     )
     
     # Simulation parameters
-    parser.add_argument("--num_requests", type=int, default=800, 
+    parser.add_argument("--num_requests", type=int, default=1000, 
                        help="Total number of requests (local test: 800, production: 2000+)")
     parser.add_argument("--qps", type=float, default=10.0, 
                        help="Queries per second (very high QPS shows priority scheduling benefits)")
