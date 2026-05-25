@@ -263,12 +263,12 @@ def main():
         "--schedulers", nargs="+", default=["vllm", "orca", "sarathi", "llumlet"]
     )
     parser.add_argument(
-        "--num_requests", type=int, default=400, help="Total number of requests"
+        "--num_requests", type=int, default=800, help="Total number of requests"
     )
     parser.add_argument(
         "--qps",
         type=float,
-        default=2.0,
+        default=8.0,
         help="Queries per second (affects simulation duration: ~num_requests/qps seconds)",
     )
     parser.add_argument("--model", type=str, default="meta-llama/Llama-2-7b-hf")

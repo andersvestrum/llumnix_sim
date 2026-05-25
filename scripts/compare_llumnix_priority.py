@@ -333,7 +333,7 @@ def main():
     parser.add_argument(
         "--num_requests",
         type=int,
-        default=800,
+        default=1000,
         help="Total number of requests (local test: 800, production: 2000+)",
     )
     parser.add_argument(
