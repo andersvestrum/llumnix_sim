@@ -1,168 +1,102 @@
-# Vidur: LLM Inference System Simulator
+<h2 align="center">Beyond Binary Priorities: Multi-Tier SLA Scheduling for Large Language Model Serving</h2>
 
-Vidur is a high-fidelity and extensible LLM inference system simulator. It can help you with:
+<p align="center">
+  <strong>Project repository for extending Llumnix's binary priority model to arbitrary multi-tier SLA scheduling, evaluated in the Vidur LLM inference simulator.</strong>
+</p>
 
-1. Study the system performance of models under different workloads and configurations.
+<p align="center">
+  Anders Vestrum, Arya Raeesi, Hanna Rød<br>
+  UC Berkeley, EECS Department
+</p>
 
-    | TTFT | TPOT | Request E2E Time | Batch Size |
-    | --- | --- | --- | --- |
-    | ![TTFT](./assets/prefill_e2e_time.png) | ![TPOT](./assets/decode_time_execution_plus_preemption_normalized.png) | ![Request E2E Time](./assets/request_e2e_time.png) | ![Batch Size](./assets/batch_size.png) |
+<p align="center">
+  <a href="./docs/Multi-Tier_SLA_Scheduling_for_Large_Language_Model_Serving.pdf">Final Paper</a>
+  |
+  <a href="https://arxiv.org/abs/2406.03243">Llumnix Paper</a>
+  |
+  <a href="https://github.com/microsoft/vidur">Vidur Simulator</a>
+</p>
 
-    *`Llama-3-8B` running the [AzureLLMInferenceTrace2023_conv](https://github.com/Azure/AzurePublicDataset/blob/master/data/AzureLLMInferenceTrace_conv.csv) trace on single `A100 80GB` at 6.45 QPS*
+## Overview
 
-1. Capacity planning and finding the best deployment configuration for your LLM deployments.
-   ![Config Search](./assets/llama70b_Chat1M_ttft_tbt_90_99_2.0_0.2.jpeg)
-*Capacity per dollar for different deployment configurations vs TTFT-P90 and TBT-P99 for LLaMA2-70B.*
-1. Quickly test new research ideas like new scheduling algorithms, optimizations like speculative decoding, etc.
+Modern LLM serving deployments must simultaneously satisfy heterogeneous service-level objectives (SLOs) across a diverse population of user tiers, ranging from latency-critical interactive API calls to background batch processing. Llumnix introduced a dynamic, migration-capable multi-instance scheduler that achieves load balancing, defragmentation, prioritization, and auto-scaling through a unified **"freeness"** metric.
 
-... all without access to GPUs except for a quick initial profiling phase 🎉. We highly recommend checking out our [MLSys'24 paper](https://arxiv.org/abs/2405.05465) and [talk](https://mlsys.org/virtual/2024/poster/2667) for more details.
+This repository focuses on a narrower and more diagnostic question:
 
+**What is the right number of priority tiers for a migration-capable LLM serving system, and how should isolation headroom be allocated across them?**
 
-## Supported Models
+Llumnix's priority model is restricted to two levels (high and normal) controlled by a single fixed headroom value, an abstraction too coarse to express the richer SLA classes common in production deployments. Providers commonly differentiate across three-to-five SLA tiers (e.g., platinum, gold, silver, standard, free-tier) with distinct latency targets. We extend Llumnix to support an arbitrary number of tiers and characterize the tradeoff that finer priority granularity introduces.
 
-__Instructions on adding a new model to existing or new SKUs can be found [here](docs/profiling.md)__.
+This is a scheduling-research project built on top of the Vidur simulator and the Llumnix design, not the upstream training or serving repositories themselves.
 
-| Model / Device | A100 80GB DGX | H100 DGX | 4xA100 80GB Pairwise NVLink Node | 8xA40 Pairwise NVLink Node |
-| --- | --- | --- | --- | --- |
-| `meta-llama/Meta-Llama-3-8B` | ✅ | ❌ | ✅ | ❌ |
-| `meta-llama/Meta-Llama-3-70B` | ✅ | ❌ | ✅ | ❌ |
-| `meta-llama/Llama-2-7b-hf` | ✅ | ✅ | ✅ | ✅ |
-| `codellama/CodeLlama-34b-Instruct-hf"` | ✅ | ✅ | ✅ | ✅ |
-| `meta-llama/Llama-2-70b-hf` | ✅ | ✅ | ✅ | ✅ |
-| `internlm/internlm-20b` | ✅ | ✅ | ✅ | ✅ |
-| `Qwen/Qwen-72B` | ✅ | ✅ | ✅ | ✅ |
+## Core Idea
 
-* All models support a maximum context length of 4k except `Llama3-8B` and `Llama3-70B` which support 16k context length by passing additional CLI params:
+We generalize Llumnix's single scalar headroom to `K` priority tiers, where each tier `p ∈ {0, …, K−1}` receives a dedicated headroom budget allocated by exponential decay. We then sweep `K` from 1 to 10 and measure the effect on per-tier latency, aggregate latency, and cost-efficiency.
 
-    ```text
-    --random_forrest_execution_time_predictor_config_prediction_max_prefill_chunk_size 16384 \
-    --random_forrest_execution_time_predictor_config_prediction_max_batch_size 512 \
-    --random_forrest_execution_time_predictor_config_prediction_max_tokens_per_request 16384
-    ```
+The central abstraction is the **freeness** of a replica:
 
-* Pipeline parallelism is supported for all models. The PP dimension should divide the number of layers in the model.
-* In DGX nodes, there are 8 GPUs, fully connected via NVLink. So TP1, TP2, TP4 and TP8 are supported.
-* In 4x pairwise NVLink nodes, there are 4 GPUs, so TP1, TP2 and TP4 are supported. TP4 here is less performant than TP4 in DGX nodes because (GPU1, GPU2) are connected via NVLink and (GPU3, GPU4) are connected via NVLink. but between these layers, the interconnect is slower.
-* You can use any combination of TP and PP. For example, you can run LLaMA2-70B on TP2-PP2 on a 4xA100 80GB Pairwise NVLink Node.
+| Quantity | Definition | What it measures |
+| --- | --- | --- |
+| `F = (M − Σ_r V(r)) / B` | capacity `M` minus total virtual usage, normalized by batch size `B` | available capacity; `F < 0` triggers migration |
+| `H_p = M · h_max · e^(−λp)` | per-tier headroom budget (`h_max = 0.20`) | KV-cache reserved to isolate tier `p` |
+| `F_full` | freeness including priority headroom | drives dispatch and migration targeting |
+| `F_normal` | freeness excluding headroom | drives auto-scaling, avoiding spurious scale-out |
 
-## Setup
+Tier 0 is the highest priority (critical/interactive) and tier `K−1` is the lowest (background/batch), consistent with Llumnix's convention. Each tier's full budget `H_p` is charged whenever *any* request of that priority is present, so a single critical request can effectively block normal-priority dispatch to an overloaded replica.
 
-### Using `mamba`
+## Project Goals
 
-To run the simulator, create a mamba environment with the given dependency file.
+- Extend Llumnix's binary high/normal priority model to support up to 10 SLA tiers with per-tier headroom and priority-aware dispatch ordering.
+- Implement full live migration of running requests inside the Vidur simulator, faithful to Llumnix's multi-stage KV-cache transfer.
+- Identify the priority-granularity sweet spot that maximizes cost-efficiency without collapsing tail latency.
+- Characterize how priority effectiveness interacts with system load and with realistic workload distributions (uniform, Gaussian, enterprise).
+- Provide a reproducible, GPU-free evaluation framework for SLA-aware multi-instance LLM scheduling.
 
-```sh
-mamba env create -p ./env -f ./environment.yml
-mamba env update -f environment-dev.yml
-```
+## Audit Pipeline
 
-### Using `venv`
+The final paper centers on the following pipeline:
 
-1. Ensure that you have Python 3.10 installed on your system. Refer <https://www.bitecode.dev/p/installing-python-the-bare-minimum>
-2. `cd` into the repository root
-3. Create a virtual environment using `venv` module using `python3.10 -m venv .venv`
-4. Activate the virtual environment using `source .venv/bin/activate`
-5. Install the dependencies using `python -m pip install -r requirements.txt`
-6. Run `deactivate` to deactivate the virtual environment
+1. Generate synthetic request streams with a length distribution calibrated to realistic LLM API traffic (right-skewed, ~65% short conversational turns).
+2. Assign each request a priority tier by sampling from one of three distributions — uniform, Gaussian, or enterprise — via the `PrioritySampler`.
+3. Dispatch requests through the multi-tier `LlumnixGlobalScheduler` (priority-ordered, freest-replica selection) to per-instance `LlumletReplicaScheduler` instances.
+4. Periodically evaluate load imbalance and run multi-stage live migration to rebalance overloaded replicas; emit auto-scaling recommendations from cluster-average normal-priority freeness.
+5. Sweep priority-tier count `K` from 1 to 10, across two request-volume scales (10K and 15K requests).
+6. Aggregate per-tier and cluster-wide metrics (TTFT, TBT, end-to-end latency percentiles, prefill/decode speedups, cost-per-latency) and compare against four baseline schedulers.
 
-### Using `conda` (Least recommended)
+## Why This Matters
 
-To run the simulator, create a conda environment with the given dependency file.
+Migration-capable schedulers like Llumnix are appealing because they promise editable, isolatable quality-of-service across heterogeneous workloads without overprovisioning. If that promise extends to fine-grained SLA classes, providers could offer differentiated latency guarantees to many tiers from a single shared cluster.
 
-```sh
-conda env create -p ./env -f ./environment.yml
-conda env update -f environment-dev.yml
-```
+But isolation has a cost: every active tier consumes headroom, reducing effective batching capacity. This project tests directly where the line is — how many priority tiers a freeness-based scheduler can support before the overhead of reserved headroom outweighs the SLA-differentiation benefit.
 
-### Setting up wandb (Optional)
+## Results
 
-First, setup your account on `https://<your-org>.wandb.io/` or public wandb, obtain the api key and then run the following command,
+The evaluation sweeps the cross product of priority-tier count, workload distribution, request volume, and scheduler. The headline findings reported in the final paper:
 
-```sh
-wandb login --host https://<your-org>.wandb.io
-```
+**Four priority tiers is consistently optimal.** At `K = 4`, all three workload distributions achieve peak end-to-end P99 speedup, near-peak E2E mean speedup, and peak cost-per-latency improvement. Four tiers provides enough granularity to separate critical, high, standard, and background traffic without fragmenting queues so finely that load-balancing heuristics lose effectiveness. Beyond `K = 5`, benefits plateau and overhead from headroom fragmentation begins to dominate.
 
-To opt out of wandb, pick any one of the following methods:
+**Prefill mean speedup exceeds the original paper.** Across all conditions, our system achieves a prefill mean speedup of 5.0–8.3× over the INFaaS+vLLM baseline, substantially exceeding Llumnix's reported ≤2.2×. We attribute this to migration-driven load balancing that prevents the "convoy effect" where bursty prefill requests pile up on a single overloaded instance.
 
-1. `export WANDB_MODE=disabled` in your shell or add this in `~/.zshrc` or `~/.bashrc`. Remember to reload using `source ~/.zshrc`.
-2. Set `wandb_project` and `wandb_group` as `""` in `vidur/config/default.yml`. Also, remove these CLI params from the shell command with which the simulator is invoked.
+**Cost-per-latency improvements of 46–68%** (10K requests) and 24–53% (15K requests) compare favorably to Llumnix's reported 16–36%, attributable to consolidating low-priority requests and freeing capacity for high-priority workloads.
 
-## Running the simulator
+**No tail-latency collapse up to 10 tiers.** Aggregate P50/P90/P99 across all schedulers remains broadly stable as `K` increases from 1 to 10, confirming baseline parity: the multi-tier scheduler does not degrade aggregate performance, with prioritization overhead concentrated in the prefill phase while decode latency stays stable.
 
-To run the simulator, execute the following command from the repository root,
+**Load-dependence.** Priority benefits are most pronounced at moderate load, where freeness variance across replicas is high and migration opportunities are abundant. Near saturation, average freeness approaches zero and migration loses leverage — suggesting priority scheduling should be paired with proactive auto-scaling.
 
-```sh
-python -m vidur.main
-```
+## Acknowledgements
 
-or a big example with all the parameters,
+We thank the authors of the Vidur and Llumnix open-source projects for making their frameworks publicly available. This work used computing resources provided by Berkeley Research Computing through the Compton Spectrometer and Imager (COSI) mission (NASA Small Explorers (SMEX) Program).
 
-```sh
-python -m vidur.main  \
---replica_config_device a100 \
---replica_config_model_name meta-llama/Meta-Llama-3-8B \
---cluster_config_num_replicas 1 \
---replica_config_tensor_parallel_size 1 \
---replica_config_num_pipeline_stages 1 \
---request_generator_config_type synthetic \
---synthetic_request_generator_config_num_requests 512  \
---length_generator_config_type trace \
---trace_request_length_generator_config_max_tokens 16384 \
---trace_request_length_generator_config_trace_file ./data/processed_traces/splitwise_conv.csv \
---interval_generator_config_type poisson \
---poisson_request_interval_generator_config_qps 6.45 \
---replica_scheduler_config_type sarathi  \
---sarathi_scheduler_config_batch_size_cap 512  \
---sarathi_scheduler_config_chunk_size 512 \
---random_forrest_execution_time_predictor_config_prediction_max_prefill_chunk_size 16384 \
---random_forrest_execution_time_predictor_config_prediction_max_batch_size 512 \
---random_forrest_execution_time_predictor_config_prediction_max_tokens_per_request 16384
-```
+## References
 
-or to get information on all parameters,
+- Sun, B., et al. Llumnix: Dynamic scheduling for large language model serving. In *Proceedings of the 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI)*, 2024.
+- Agrawal, A., Kedia, N., Panwar, A., Mohan, J., Kwatra, N., Gulavani, B. S., Tumanov, A., and Ramjee, R. Vidur: A large-scale simulation framework for LLM inference. In *Proceedings of Machine Learning and Systems (MLSys)*, 2024. [arXiv:2405.05465](https://arxiv.org/abs/2405.05465).
+- Kwon, W., Li, Z., Zhuang, S., Sheng, Y., Zheng, L., Yu, C. H., Gonzalez, J. E., Zhang, H., and Stoica, I. Efficient memory management for large language model serving with PagedAttention (vLLM). In *Proceedings of the 29th ACM Symposium on Operating Systems Principles (SOSP)*, 2023. [arXiv:2309.06180](https://arxiv.org/abs/2309.06180).
+- Yu, G.-I., Jeong, J. S., Kim, G.-W., Kim, S., and Chun, B.-G. Orca: A distributed serving system for transformer-based generative models. In *Proceedings of the 16th USENIX Symposium on Operating Systems Design and Implementation (OSDI)*, 2022.
+- Agrawal, A., Kedia, N., Panwar, A., Mohan, J., Kwatra, N., Gulavani, B. S., Tumanov, A., and Ramjee, R. Taming throughput-latency tradeoff in LLM inference with Sarathi-Serve. In *Proceedings of the 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI)*, 2024. [arXiv:2403.02310](https://arxiv.org/abs/2403.02310).
+- Romero, F., Li, Q., Yadwadkar, N. J., and Kozyrakis, C. INFaaS: Automated model-less inference serving. In *USENIX Annual Technical Conference (ATC)*, 2021.
+- Li, Z., Zheng, L., Zhong, Y., Liu, V., Sheng, Y., Jin, X., Huang, Y., Chen, Z., Zhang, H., Gonzalez, J. E., and Stoica, I. AlpaServe: Statistical multiplexing with model parallelism for deep learning serving. In *Proceedings of the 17th USENIX Symposium on Operating Systems Design and Implementation (OSDI)*, 2023. [arXiv:2302.11665](https://arxiv.org/abs/2302.11665).
 
-```sh
-python -m vidur.main -h
-```
+## License
 
-## Simulator Output
-
-* The metrics will be logged to wandb directly and a copy will be stored in the `simulator_output/<TIMESTAMP>` directory. __A description of all the logged metrics can be found [here](docs/metrics.md).__
-* Vidur exports chrome traces of each simulation. The trace can be found in the `simulator_output` directory. The trace can be opened by navigating to `chrome://tracing/` or `edge://tracing/` and loading the trace.
-
-    ![Chrome Trace](./assets/chrome_trace.png)
-
-## Formatting Code
-
-To format code, execute the following command:
-
-```sh
-make format
-```
-
-## Using Canary Build
-
-We have been working on several improvements for the simulator, including support for prefix caching, different routing policies, reducing memory requirements for the simulator, etc. However, there are some sharp edges that we are working on resolving. In the meantime, if you are looking for support for any of these features, please use the `canary` branch.
-
-## Contributing
-
-This project welcomes contributions and suggestions.  Most contributions require you to agree to a
-Contributor License Agreement (CLA) declaring that you have the right to, and actually do, grant us
-the rights to use your contribution. For details, visit https://cla.opensource.microsoft.com.
-
-When you submit a pull request, a CLA bot will automatically determine whether you need to provide
-a CLA and decorate the PR appropriately (e.g., status check, comment). Simply follow the instructions
-provided by the bot. You will only need to do this once across all repos using our CLA.
-
-This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/).
-For more information see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or
-contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
-
-## Trademarks
-
-This project may contain trademarks or logos for projects, products, or services. Authorized use of Microsoft 
-trademarks or logos is subject to and must follow 
-[Microsoft's Trademark & Brand Guidelines](https://www.microsoft.com/en-us/legal/intellectualproperty/trademarks/usage/general).
-Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion or imply Microsoft sponsorship.
-Any use of third-party trademarks or logos are subject to those third-party's policies.
-
+This project is licensed under the MIT License. See [LICENSE](./LICENSE) for details.
