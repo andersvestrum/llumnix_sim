@@ -3,7 +3,7 @@ from functools import reduce
 from typing import Dict, List
 
 import pandas as pd
-import plotly_express as px
+import matplotlib.pyplot as plt
 import wandb
 
 from vidur.config import SimulationConfig
@@ -294,12 +294,15 @@ class MetricsStore:
                 step=0,
             )
         if self._config.store_plots:
-            fig = px.bar(
-                x=list(data.keys()),
-                y=list(data.values()),
-                labels={"x": x_label, "y": y_label},
-            )
-            fig.write_image(f"{base_path}/{plot_name}.png")
+            fig, ax = plt.subplots()
+            ax.bar(list(data.keys()), list(data.values()), color="steelblue")
+            ax.set_xlabel(x_label)
+            ax.set_ylabel(y_label)
+            ax.set_title(plot_name)
+            ax.tick_params(axis="x", rotation=45)
+            fig.tight_layout()
+            fig.savefig(f"{base_path}/{plot_name}.png")
+            plt.close(fig)
 
     def _store_operation_metrics(self, base_plot_path: str):
         if not self._config.store_operation_metrics:

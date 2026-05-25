@@ -78,68 +78,72 @@ class PrioritySampler:
             # Gaussian-like: peak at middle priority
             if self.num_levels == 1:
                 return [1.0]
-            elif self.num_levels == 2:
-                return [0.3, 0.7]  # 30% critical, 70% high
-            elif self.num_levels == 3:
-                return [0.15, 0.70, 0.15]  # centered on normal
-            elif self.num_levels == 5:
-                return [0.05, 0.20, 0.50, 0.20, 0.05]  # bell curve
-            else:
-                # General case: approximate normal via binomial-like weights
-                mid = self.num_levels // 2
-                weights = []
-                for i in range(self.num_levels):
-                    dist = abs(i - mid)
-                    weights.append(math.exp(-dist * dist / (self.num_levels / 2.0)))
-                total = sum(weights)
-                return [w / total for w in weights]
+            # General case: approximate normal via Gaussian weights
+            # Works well for 2-10 priority levels
+            mid = (self.num_levels - 1) / 2.0
+            sigma = self.num_levels / 4.0  # Spread across ~4 sigma
+            weights = []
+            for i in range(self.num_levels):
+                dist = (i - mid) / sigma
+                weights.append(math.exp(-0.5 * dist * dist))
+            total = sum(weights)
+            return [w / total for w in weights]
         
         elif self.distribution_type == PriorityDistributionType.POWER_LAW:
-            # Heavy tail: most requests at normal, few at critical
+            # Heavy tail: most requests at lower priorities, few at high
+            # Works for 1-10 priority levels
             if self.num_levels == 1:
                 return [1.0]
-            elif self.num_levels == 2:
-                return [0.10, 0.90]  # 10% critical, 90% high
-            elif self.num_levels == 3:
-                return [0.05, 0.15, 0.80]  # 80% normal baseline
-            elif self.num_levels == 5:
-                return [0.02, 0.08, 0.70, 0.15, 0.05]
-            else:
-                # General power-law decay: higher priority = lower probability
-                weights = [1.0 / (i + 1) ** 1.5 for i in range(self.num_levels)]
-                total = sum(weights)
-                return [w / total for w in weights]
+            # Power-law decay: P(priority=k) ∝ 1/(k+1)^α
+            # α=1.5 gives good differentiation across priority levels
+            alpha = 1.5
+            weights = [1.0 / (i + 1) ** alpha for i in range(self.num_levels)]
+            total = sum(weights)
+            return [w / total for w in weights]
         
         elif self.distribution_type == PriorityDistributionType.ENTERPRISE:
-            # Enterprise mix: 60% normal, 30% high, 10% critical
+            # Enterprise mix: most at middle priorities, some high, few critical
+            # Works for 1-10 priority levels
             if self.num_levels == 1:
                 return [1.0]
             elif self.num_levels == 2:
-                return [0.25, 0.75]  # 25% critical, 75% high
-            elif self.num_levels == 3:
-                return [0.10, 0.30, 0.60]
-            elif self.num_levels == 5:
-                return [0.10, 0.30, 0.50, 0.08, 0.02]
+                return [0.25, 0.75]  # 25% critical, 75% normal
+            # General case: exponential decay from middle toward extremes
+            # Critical gets 10%, then exponential decay
+            weights = []
+            weights.append(0.10)  # Critical priority
+            if self.num_levels > 2:
+                # Middle priorities get bulk of traffic
+                middle_weight = 0.70 / max(1, self.num_levels - 2)
+                for i in range(1, self.num_levels - 1):
+                    weights.append(middle_weight)
+                # Lowest priority gets remainder
+                weights.append(max(0.05, 1.0 - sum(weights)))
             else:
-                # Skew toward higher priorities
-                weights = [0.1] + [0.3 / (self.num_levels - 2)] * (self.num_levels - 2) + [0.6 / 1]
-                weights[-1] = max(0.5, 1.0 - sum(weights[:-1]))
-                return weights
+                weights.append(0.90)
+            total = sum(weights)
+            return [w / total for w in weights]
         
         elif self.distribution_type == PriorityDistributionType.BURSTIER:
-            # Burstier mix: 70% normal, 20% high, 10% critical
+            # Burstier mix: heavy concentration at middle, with some high-priority bursts
+            # Works for 1-10 priority levels
             if self.num_levels == 1:
                 return [1.0]
             elif self.num_levels == 2:
                 return [0.30, 0.70]
-            elif self.num_levels == 3:
-                return [0.10, 0.20, 0.70]
-            elif self.num_levels == 5:
-                return [0.10, 0.20, 0.60, 0.08, 0.02]
+            # General case: concentrate at middle priorities
+            weights = []
+            weights.append(0.10)  # Critical (burst)
+            if self.num_levels > 2:
+                weights.append(0.20)  # High (burst)
+                # Middle/low priorities share remainder
+                middle_weight = 0.70 / max(1, self.num_levels - 2)
+                for i in range(2, self.num_levels):
+                    weights.append(middle_weight)
             else:
-                weights = [0.1, 0.2] + [0.6 / (self.num_levels - 2)] * (self.num_levels - 2)
-                total = sum(weights)
-                return [w / total for w in weights]
+                weights.append(0.90)
+            total = sum(weights)
+            return [w / total for w in weights]
         
         elif self.distribution_type == PriorityDistributionType.TIME_OF_DAY:
             # For now, default to enterprise; actual time-varying logic can be added in sample()
@@ -149,20 +153,20 @@ class PrioritySampler:
                 return self._build_weights_for_type(PriorityDistributionType.ENTERPRISE)
         
         elif self.distribution_type == PriorityDistributionType.TRAFFIC_CLASS:
-            # Traffic class: 80% background, 15% normal, 5% high
+            # Traffic class: heavy concentration on background/low priority
+            # Works for 1-10 priority levels
             if self.num_levels == 1:
                 return [1.0]
-            elif self.num_levels == 2:
-                return [0.20, 0.80]  # 20% critical, 80% normal
-            elif self.num_levels == 3:
-                return [0.05, 0.15, 0.80]
-            elif self.num_levels == 5:
-                return [0.02, 0.08, 0.15, 0.20, 0.55]  # heavy on background
-            else:
-                # Skew toward lowest priority (background)
-                weights = [0.05 / (self.num_levels - 1)] * (self.num_levels - 1) + [0.75]
-                total = sum(weights)
-                return [w / total for w in weights]
+            # General case: inverse priority weighting (low priority = high probability)
+            # Background (lowest) gets 60-75% of traffic
+            weights = []
+            background_weight = min(0.75, 0.60 + 0.05 * (self.num_levels - 2))
+            high_priority_weight = (1.0 - background_weight) / max(1, self.num_levels - 1)
+            for i in range(self.num_levels - 1):
+                weights.append(high_priority_weight)
+            weights.append(background_weight)  # Lowest priority
+            total = sum(weights)
+            return [w / total for w in weights]
         
         else:
             # Default: uniform

@@ -83,23 +83,15 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
         # Per-priority headroom pools (Algorithm 1, line 10: headroomForPriority[p])
         # Headroom should be scaled relative to replica capacity (M = num_blocks)
         # Paper uses headroom as fraction of capacity, not absolute value
-        # Graduated headroom: 20-10-5-0-0 for priorities 0-4
         M = max(1, cfg.num_blocks)
-        default_headroom = getattr(cfg, "priority_headroom_blocks", int(M * 0.10))  # 10% default
-        self._headroom_for_priority: List[int] = []
-        for p in range(self._num_priority_levels):
-            if p == 0:
-                # Highest priority: 20% of capacity
-                self._headroom_for_priority.append(int(M * 0.20))
-            elif p == 1:
-                # Second priority: 10% of capacity
-                self._headroom_for_priority.append(int(M * 0.10))
-            elif p == 2:
-                # Third priority: 5% of capacity
-                self._headroom_for_priority.append(int(M * 0.05))
-            else:
-                # Lower priorities (3-4): no headroom
-                self._headroom_for_priority.append(0)
+        
+        # Get headroom decay mode from config
+        headroom_decay_mode = getattr(cfg, "headroom_decay_mode", "exponential")
+        
+        # Calculate headroom for each priority level using configurable decay
+        self._headroom_for_priority: List[int] = self._calculate_headroom_distribution(
+            M, self._num_priority_levels, headroom_decay_mode
+        )
         
         # NOTE: Batch normalizer B is now DYNAMIC (current batch size = len(allocation_map))
         # Previously used static config value, now computed on-demand in report_freeness()
@@ -107,6 +99,71 @@ class LlumletLocalScheduler(BaseReplicaScheduler):
         
         # Migration stage granularity: how many KV blocks per migration stage
         self._migration_stage_blocks: int = getattr(cfg, "migration_stage_blocks", 1) or 1
+    
+    def _calculate_headroom_distribution(
+        self, capacity: int, num_levels: int, decay_mode: str
+    ) -> List[int]:
+        """
+        Calculate headroom for each priority level with configurable decay.
+        
+        Args:
+            capacity: Total KV cache capacity (M = num_blocks)
+            num_levels: Number of priority levels (1-10 supported)
+            decay_mode: "linear" or "exponential"
+        
+        Returns:
+            List of headroom values (in blocks) for each priority level
+        
+        Headroom semantics:
+        - Priority 0 (highest): Gets largest headroom
+        - Priority N-1 (lowest): Gets minimal/no headroom
+        - Decay controls how quickly headroom decreases
+        """
+        if num_levels <= 0:
+            return []
+        
+        if num_levels == 1:
+            # Single priority: no differentiation needed
+            return [0]
+        
+        headroom = []
+        
+        if decay_mode == "linear":
+            # Linear decay: evenly spaced from max to min
+            # Highest priority gets 20% of capacity
+            # Lowest priority gets 0%
+            max_headroom_fraction = 0.20
+            for p in range(num_levels):
+                # Linear interpolation from max to 0
+                fraction = max_headroom_fraction * (1.0 - p / (num_levels - 1))
+                headroom.append(int(capacity * fraction))
+        
+        elif decay_mode == "exponential":
+            # Exponential decay: rapid decrease for lower priorities
+            # Highest priority gets 20% of capacity
+            # Decay factor ensures smooth exponential curve
+            import math
+            max_headroom_fraction = 0.20
+            
+            # Decay constant tuned for num_levels
+            # Ensures lowest priority gets near-zero headroom
+            decay_constant = 2.5 / max(1, num_levels - 1)
+            
+            for p in range(num_levels):
+                # Exponential decay: e^(-decay_constant * p)
+                fraction = max_headroom_fraction * math.exp(-decay_constant * p)
+                headroom.append(int(capacity * fraction))
+        
+        else:
+            # Default to exponential if unknown mode
+            import math
+            max_headroom_fraction = 0.20
+            decay_constant = 2.5 / max(1, num_levels - 1)
+            for p in range(num_levels):
+                fraction = max_headroom_fraction * math.exp(-decay_constant * p)
+                headroom.append(int(capacity * fraction))
+        
+        return headroom
 
     # -------------------- Properties --------------------
     @property
