@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="./docs/Multi-Tier_SLA_Scheduling_for_Large_Language_Model_Serving.pdf">Final Paper</a>
+  <a href="https://arxiv.org/abs/2608.16336">Final Paper</a>
   |
   <a href="https://arxiv.org/abs/2406.03243">Llumnix Paper</a>
   |
