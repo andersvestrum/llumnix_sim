@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  Anders Vestrum, Arya Raeesi, Hanna Rød<br>
+  Anders Vestrum, Arya Raeesi, Hanna Roed<br>
   UC Berkeley, EECS Department
 </p>
 
@@ -94,7 +94,7 @@ If you use this work, please cite:
 ```bibtex
 @misc{llumnix_beyond_binary,
   title         = {Beyond Binary Priorities: Multi-Tier SLA Scheduling for Large Language Model Serving},
-  author        = {Anders Vestrum and Arya Raeesi and Hanna R{\o}ed},
+  author        = {Anders Vestrum and Arya Raeesi and Hanna Roed},
   year          = {2026},
   eprint        = {2608.16336},
   archivePrefix = {arXiv},
