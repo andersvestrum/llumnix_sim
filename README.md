@@ -87,6 +87,23 @@ The evaluation sweeps the cross product of priority-tier count, workload distrib
 
 We thank the authors of the Vidur and Llumnix open-source projects for making their frameworks publicly available. This work used computing resources provided by Berkeley Research Computing through the Compton Spectrometer and Imager (COSI) mission (NASA Small Explorers (SMEX) Program).
 
+## Citation
+
+If you use this work, please cite:
+
+```bibtex
+@misc{llumnix_beyond_binary,
+  title         = {Beyond Binary Priorities: Multi-Tier SLA Scheduling for Large Language Model Serving},
+  author        = {Anders Vestrum and Arya Raeesi and Hanna R{\o}ed},
+  year          = {2026},
+  eprint        = {2608.16336},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.AR},
+  doi           = {10.48550/arXiv.2608.16336},
+  url           = {https://arxiv.org/abs/2608.16336}
+}
+```
+
 ## References
 
 - Sun, B., et al. Llumnix: Dynamic scheduling for large language model serving. In *Proceedings of the 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI)*, 2024.
